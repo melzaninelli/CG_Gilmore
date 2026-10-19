@@ -1,0 +1,11 @@
+Model Information:
+* title:	Starbucks Disposable Cup
+* source:	https://sketchfab.com/3d-models/starbucks-disposable-cup-b1b9085153d44b9c89111ee26c927259
+* author:	neelbafna123 (https://sketchfab.com/neelbafna123)
+
+Model License:
+* license type:	CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
+* requirements:	Author must be credited. Commercial use is allowed.
+
+If you use this 3D model in your project be sure to copy paste this credit wherever you share it:
+This work is based on "Starbucks Disposable Cup" (https://sketchfab.com/3d-models/starbucks-disposable-cup-b1b9085153d44b9c89111ee26c927259) by neelbafna123 (https://sketchfab.com/neelbafna123) licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
