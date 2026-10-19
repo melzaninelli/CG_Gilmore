@@ -128,20 +128,26 @@ A movimentação será calculada com base no intervalo de tempo entre quadros, g
 Exemplo de organização sugerida:
 
 ```text
-gilmore-girls/
+CG_Gilmore/
 ├── public/
-│   ├── models/
-│   └── textures/
+│   └── models/            
 ├── src/
-│   ├── main.js
-│   ├── scene.js
-│   ├── camera.js
-│   ├── lights.js
-│   ├── controls.js
-│   └── diagnostics.js
+│   ├── main.js            
+│   ├── scene.js           
+│   ├── camera.js          
+│   ├── lights.js          
+│   ├── controls.js        
+│   ├── diagnostics.js     
+│   ├── models.js          
+│   ├── terrain.js         
+│   ├── buildings.js       
+│   ├── props.js           
+│   ├── decor.js           
+│   ├── utils.js           
+│   └── config.js          
 ├── index.html
 ├── package.json
-├── package-lock.json
+├── .gitignore
 └── README.md
 ```
 
