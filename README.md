@@ -115,6 +115,7 @@ O cenário utilizará pelo menos três modelos 3D externos, integrados à compos
 | Starbucks Disposable Cup | OBJ | NEEL BAFNA |
 | Wooden Gazebo | GLTF | Andrew Weems |
 | CAFETERIA SALLE | GLTF | Karen Rocha |
+| Coffe Cup | OBJ | https://www.cgtrader.com/designers/jd-imagery?utm_source=credit&utm_source=credit_item_page|
 
 Os créditos, autores, fontes originais e licenças de uso serão registrados nesta documentação.
 
