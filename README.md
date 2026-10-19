@@ -112,9 +112,9 @@ O cenário utilizará pelo menos três modelos 3D externos, integrados à compos
 
 | Modelo | Formato | Fonte e licença |
 |---|---|---|
-| Modelo 1 | OBJ | A preencher |
-| Modelo 2 | GLB/GLTF | A preencher |
-| Modelo 3 | A definir | A preencher |
+| Starbucks Disposable Cup | OBJ | NEEL BAFNA |
+| Wooden Gazebo | GLTF | Andrew Weems |
+| CAFETERIA SALLE | GLTF | Karen Rocha |
 
 Os créditos, autores, fontes originais e licenças de uso serão registrados nesta documentação.
 
@@ -144,7 +144,6 @@ gilmore-girls/
 └── README.md
 ```
 
-*A estrutura poderá variar conforme a organização adotada pela equipe.*
 
 
 ---
