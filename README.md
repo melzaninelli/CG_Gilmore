@@ -151,6 +151,65 @@ CG_Gilmore/
 └── README.md
 ```
 
+## Iluminação e sombras
+
+**Referência visual:** tarde de outono em Stars Hollow, com céu claro/nublado, sol baixo e quente, sombras macias e cores quentes.
+
+### Luzes (2 tipos)
+
+| Luz | Tipo | Cor | Intensidade | Projeta sombra |
+|---|---|---|---|---|
+| Céu/chão | `HemisphereLight` | céu `#fff1d6`, chão `#7a6a4c` | 0.95 | Não |
+| Sol | `DirectionalLight` | `#ffe6bf` | 1.5 | Sim |
+
+**HemisphereLight (ambiente).** Representa a luz difusa do céu nublado e o rebatimento do solo. Foi escolhida no lugar da `AmbientLight` porque a cor varia com a orientação da superfície (tetos mais claros, laterais mais quentes), o que preserva o volume dos prédios nas áreas em sombra. Não projeta sombra, pois luz difusa não tem direção e isso poupa uma passada de renderização. A intensidade 0.95 evita sombras totalmente pretas sem competir com o sol.
+
+**DirectionalLight (sol).** Raios paralelos são o modelo adequado para uma fonte muito distante. `PointLight` e `SpotLight` gerariam sombras divergentes e a `PointLight` exigiria mapa de sombra cúbico (6 passadas). A posição (15, 22, 12) dá uma elevação de cerca de 45°, típica de sol de fim de tarde. A intensidade 1.5, maior que a ambiente, cria o contraste entre faces iluminadas e sombreadas.
+
+### Configuração das sombras
+
+| Parâmetro | Valor | Justificativa |
+|---|---|---|
+| `shadowMap.type` | `PCFSoftShadowMap` | Bordas suaves, coerentes com céu nublado; mais estável que VSM (sem *light bleeding*). |
+| `shadow.mapSize` | 2048 × 2048 | Com volume de 56 × 56 unidades, cada texel cobre cerca de 2,7 cm. 1024 ficaria serrilhado; 4096 quadruplica a memória sem ganho visível. |
+| Volume ortográfico | ±28 | A área jogável e os prédios vão até cerca de ±22; um volume justo concentra a resolução onde há geometria. |
+| `near` / `far` | 1 / 70 | Cobre a cena inteira com folga e mantém a faixa de profundidade curta, o que melhora a precisão do depth map. |
+| `bias` | -0.0005 | Evita *shadow acne*. |
+| `normalBias` | 0.02 | Corrige o acne em ângulos rasantes sem usar bias grande, que descolaria a sombra do objeto (*peter-panning*). |
+
+**Quem projeta e quem recebe:** projetam sombra os prédios, árvores, bancos, postes, mesa, abóboras e os modelos externos; recebem sombra o chão, as ruas, as calçadas e os próprios objetos. Detalhes finos e planos (vitrines, portas, janelas, bandeira) não projetam sombra, porque ela seria imperceptível e só custaria desempenho.
+
+**Como demonstrar:** o painel *Iluminação* (lil-gui) liga e desliga cada luz, altera as intensidades e ativa/desativa as sombras do sol.
+
+## Subida de escadas
+
+A navegação em primeira pessoa mantinha a câmera sempre à altura `EYE_HEIGHT`, então o jogador não conseguia subir degraus. A solução calcula a altura do chão sob o jogador a cada frame:
+
+1. Um raio (`THREE.Raycaster`) parte de pouco acima do chão atual (`STEP_UP_MAX = 0.6 m`) e desce contra as superfícies marcadas como caminháveis: o gazebo, a Cafeteria Salle e o degrau da prefeitura. Partir de pouco acima do chão atual faz com que degraus de até 0,6 m sejam subíveis e que tetos sejam ignorados.
+2. A altura do ponto atingido vira a altura do chão desejada. Se nada for atingido, o chão fica em y = 0.
+3. A altura do chão é suavizada com decaimento exponencial (`GROUND_SMOOTH`), para a câmera deslizar sobre os degraus em vez de dar saltos.
+4. A câmera fica em `altura do chão + EYE_HEIGHT`.
+
+Otimizações e detalhes:
+- O raio só é lançado quando o jogador está dentro da caixa (no plano XZ) de uma superfície caminhável.
+- Durante o raio, os materiais são tratados como `DoubleSide`, para que o chão não dependa da orientação das faces do modelo.
+- O limite norte do jogador (`PLAYER_LIMIT`) é liberado em frente à cafeteria (`enterDepth`), para que a escada seja alcançável.
+- O painel de diagnóstico mostra a *Altura do chão* e a malha sobre a qual o jogador está pisando.
+
+**Limitação conhecida:** não há detecção de colisão com paredes, apenas ajuste de altura. O jogador pode atravessar paredes e corrimãos; o `enterDepth` limita até onde ele entra na cafeteria.
+
+## Nota de transparência de IA
+
+**O que foi pedido à IA (Claude):** (1) documentar e justificar a configuração de iluminação e sombras já existente; (2) fazer a câmera subir escadas; (3) depurar por que a subida não funcionava.
+
+**O que a IA fez:** escreveu a justificativa das escolhas de luz e sombra; adicionou `normalBias` e os controles de iluminação no painel; implementou o cálculo de altura do chão por raycast, o indicador de diagnóstico e a liberação do limite norte em frente à cafeteria.
+
+**O que foi validado/alterado pela equipe:** [preencher: o que você testou no navegador, o que ajustou e quais valores mudou, por exemplo `enterDepth`, `STEP_UP_MAX`, `GROUND_SMOOTH`]
+
+**O que foi descartado:** [preencher: sugestões que não foram usadas]
+
+**Observação:** a primeira versão da subida de escadas não funcionou. A causa foi identificada com ajuda do painel de diagnóstico e de prints do teste: o jogador não alcançava a escada por causa do limite da praça, e a cafeteria não estava marcada como caminhável.
+
 
 
 ---
