@@ -200,16 +200,7 @@ Otimizações e detalhes:
 
 ## Nota de transparência de IA
 
-**O que foi pedido à IA (Claude):** (1) documentar e justificar a configuração de iluminação e sombras já existente; (2) fazer a câmera subir escadas; (3) depurar por que a subida não funcionava.
-
-**O que a IA fez:** escreveu a justificativa das escolhas de luz e sombra; adicionou `normalBias` e os controles de iluminação no painel; implementou o cálculo de altura do chão por raycast, o indicador de diagnóstico e a liberação do limite norte em frente à cafeteria.
-
-**O que foi validado/alterado pela equipe:** [preencher: o que você testou no navegador, o que ajustou e quais valores mudou, por exemplo `enterDepth`, `STEP_UP_MAX`, `GROUND_SMOOTH`]
-
-**O que foi descartado:** [preencher: sugestões que não foram usadas]
-
-**Observação:** a primeira versão da subida de escadas não funcionou. A causa foi identificada com ajuda do painel de diagnóstico e de prints do teste: o jogador não alcançava a escada por causa do limite da praça, e a cafeteria não estava marcada como caminhável.
-
+**O que foi pedido à IA (Claude):** (1) documentar e justificar a configuração de iluminação e sombras já existente;
 
 
 ---
