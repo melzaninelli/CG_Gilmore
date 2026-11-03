@@ -1,0 +1,11 @@
+Model Information:
+* title:	Wooden Gazebo
+* source:	https://sketchfab.com/3d-models/wooden-gazebo-321921ff0b7544ef8c0add17a62c9a5d
+* author:	Andrew Weems (https://sketchfab.com/andrewweems)
+
+Model License:
+* license type:	CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
+* requirements:	Author must be credited. Commercial use is allowed.
+
+If you use this 3D model in your project be sure to copy paste this credit wherever you share it:
+This work is based on "Wooden Gazebo" (https://sketchfab.com/3d-models/wooden-gazebo-321921ff0b7544ef8c0add17a62c9a5d) by Andrew Weems (https://sketchfab.com/andrewweems) licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
