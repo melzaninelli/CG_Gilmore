@@ -18,10 +18,10 @@ const MODELS = [
   {
     name: 'Cafeteria Salle',
     type: 'gltf',
-    url: '/models/cafeteria_salle/scene.gltf', 
-    position: [3.25, 0, -19.5],               
+    url: '/models/cafeteria_salle/scene.gltf',
+    position: [3.25, 0, -19.5],
     height: 6,
-    rotationY: 0,                             
+    rotationY: 0,
     fallbackSize: [6.5, 6, 6],
     walkable: true,   // escada e varanda da cafeteria
     enterDepth: 2.5,  // quantos metros, a partir da frente do modelo, o jogador pode avançar (escada + varanda)
@@ -43,7 +43,6 @@ const MODELS = [
     rotationY: 0,
   },
   {
-    
     name: 'Xmas Coffee Cup',
     type: 'obj',
     mtl: '/models/SB-CoffeeCupXmas-MODEL/SB-CoffeeCupXmas-MODEL/SB-CoffeeCupXmas-MODEL.mtl',
@@ -60,9 +59,13 @@ renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping; // M4: curva filmica, evita estourar o branco dos materiais PBR
+renderer.toneMappingExposure = 1.0;
 renderer.autoClear = false;
 renderer.info.autoReset = false;
 document.body.appendChild(renderer.domElement);
+
+const MAX_ANISO = renderer.capabilities.getMaxAnisotropy();
 
 const SKY = 0xe8dcc6; // céu claro/nublado de outono, como na foto de Stars Hollow
 const scene = new THREE.Scene();
@@ -122,10 +125,10 @@ topCamera.layers.enable(1);
  *      cor com a orientação da normal, então tetos ficam mais claros e
  *      laterais mais quentes/escuras, o que dá leitura de volume mesmo onde
  *      o sol não chega.
- *    - Intensidade 0.95: alta o bastante para a sombra não virar preto
- *      (céu nublado tem muita luz difusa), baixa o bastante para o sol
- *      ainda ser o protagonista. Ela NÃO projeta sombra: luz difusa de céu
- *      não tem direção, e isso também economiza uma passada de render.
+ *    - Intensidade 0.6 (M4): parte da luz difusa passou a vir do environment
+ *      map (ver abaixo), então a hemisférica foi reduzida de 0.95 para 0.6
+ *      para não somar luz ambiente em dobro. Ela NÃO projeta sombra: luz
+ *      difusa de céu não tem direção, e isso também economiza uma passada.
  *
  * 2) DirectionalLight (o SOL, luz DIRECIONAL com sombra)
  *    - Raios paralelos: é o modelo correto para uma fonte praticamente no
@@ -134,7 +137,7 @@ topCamera.layers.enable(1);
  *    - Cor 0xffe6bf (branco quente) e posição (15, 22, 12): elevação ~45°,
  *      como sol de fim de tarde de outono, comprimento de sombra suficiente
  *      para aparecer nos prédios e árvores sem cobrir a praça inteira.
- *    - Intensidade 1.5: maior que a ambiente (0.95) para criar contraste
+ *    - Intensidade 1.5: maior que a ambiente para criar contraste
  *      claro/escuro entre faces iluminadas e sombreadas.
  *
  * SOMBRAS (apenas a luz direcional projeta)
@@ -166,7 +169,7 @@ topCamera.layers.enable(1);
  * ========================================================================== */
 
 // Luz 1: ambiente do céu/chão (sem sombra)
-const hemi = new THREE.HemisphereLight(0xfff1d6, 0x7a6a4c, 0.95);
+const hemi = new THREE.HemisphereLight(0xfff1d6, 0x7a6a4c, 0.6);
 scene.add(hemi);
 
 // Luz 2: sol direcional (com sombra)
@@ -183,6 +186,204 @@ sun.shadow.camera.far = 70;
 sun.shadow.bias = -0.0005;
 sun.shadow.normalBias = 0.02;
 scene.add(sun);
+
+
+/* ==========================================================================
+ * M4 — AMBIENTE (environment map)
+ *
+ * Os materiais PBR (MeshStandardMaterial) só mostram metal, vidro e brilho de
+ * verdade se houver algo para refletir. Em vez de um HDRI externo, geramos um
+ * "céu" em gradiente (zênite acinzentado -> horizonte creme quente -> chão
+ * terra), com as mesmas cores do fundo/névoa e da luz hemisférica. O
+ * PMREMGenerator converte esse céu num mapa de ambiente pré-filtrado por
+ * rugosidade, usado como luz indireta e reflexo (scene.environment).
+ * ========================================================================== */
+function buildSkyEnvironment() {
+  const envScene = new THREE.Scene();
+  const geo = new THREE.SphereGeometry(50, 48, 24);
+  const top = new THREE.Color(0xb9c6cf);
+  const horizon = new THREE.Color(0xf3e4c6);
+  const bottom = new THREE.Color(0x7a6a4c);
+  const c = new THREE.Color();
+  const colors = [];
+  const pos = geo.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const t = pos.getY(i) / 50; // -1 .. 1
+    if (t >= 0) c.copy(horizon).lerp(top, Math.pow(t, 0.6));
+    else c.copy(horizon).lerp(bottom, Math.min(1, -t * 2.5));
+    colors.push(c.r, c.g, c.b);
+  }
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  envScene.add(new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.BackSide })));
+  // "sol" no mapa de ambiente, na mesma direção da DirectionalLight, para o reflexo combinar com a sombra
+  const sunDisc = new THREE.Mesh(
+    new THREE.SphereGeometry(4, 16, 8),
+    new THREE.MeshBasicMaterial({ color: new THREE.Color(0xffe6bf).multiplyScalar(6) })
+  );
+  sunDisc.position.copy(sun.position).normalize().multiplyScalar(45);
+  envScene.add(sunDisc);
+
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  const tex = pmrem.fromScene(envScene, 0.03).texture;
+  pmrem.dispose();
+  geo.dispose();
+  return tex;
+}
+scene.environment = buildSkyEnvironment();
+scene.environmentIntensity = 0.45;
+
+
+/* ==========================================================================
+ * M4 — TEXTURAS PROCEDURAIS PBR (cor + normal map + roughness map)
+ *
+ * Cada "kind" (brick, grass, asphalt, stone, wood, bark) gera, via canvas,
+ * três mapas a partir de um mesmo campo de altura:
+ *   - map (cor, sRGB)            : tons de cinza; a cor final vem do `color` do material (tint)
+ *   - normalMap (dados lineares) : relevo, calculado a partir do campo de altura (diferenças finitas)
+ *   - roughnessMap (linear)      : rugosidade por texel (junta de tijolo = fosca, tijolo = mais lisa)
+ * Todas são TILEÁVEIS (ruído com período inteiro), então repetem sem emenda visível.
+ * Só o mapa de cor é sRGB; normal e roughness são dados e ficam em espaço linear.
+ * ========================================================================== */
+function hash(x, y, s) {
+  const n = Math.sin(x * 127.1 + y * 311.7 + s * 74.7) * 43758.5453;
+  return n - Math.floor(n);
+}
+// ruído de valor tileável: fu/fv = nº de células ao longo de u/v (período)
+function tnoise(u, v, fu, fv, s) {
+  const x = u * fu, y = v * fv;
+  const xi = Math.floor(x), yi = Math.floor(y);
+  const xf = x - xi, yf = y - yi;
+  const a = xi % fu, b = (xi + 1) % fu, c = yi % fv, d = (yi + 1) % fv;
+  const sx = xf * xf * (3 - 2 * xf), sy = yf * yf * (3 - 2 * yf);
+  const n00 = hash(a, c, s), n10 = hash(b, c, s), n01 = hash(a, d, s), n11 = hash(b, d, s);
+  return n00 + (n10 - n00) * sx + (n01 - n00) * sy + (n00 - n10 - n01 + n11) * sx * sy;
+}
+function fbm(u, v, base, oct, s) {
+  let sum = 0, amp = 0.5, norm = 0, f = base;
+  for (let i = 0; i < oct; i++) {
+    sum += tnoise(u, v, f, f, s + i) * amp;
+    norm += amp;
+    amp *= 0.5;
+    f *= 2;
+  }
+  return sum / norm;
+}
+
+// cada padrão devolve { h: altura 0..1, l: luminância 0..1, r: rugosidade 0..1 }
+const PATTERNS = {
+  brick(u, v, x, y, s) {
+    const rowH = s / 8, bw = s / 4, m = 4;
+    const row = Math.floor(y / rowH);
+    const off = (row % 2) * bw / 2;
+    const bx = (x + off) % bw, by = y % rowH;
+    const col = Math.floor((x + off) / bw) % 4;
+    const n = fbm(u, v, 16, 3, 1);
+    if (bx < m || by < m) return { h: 0.12 + 0.1 * n, l: 0.95 - 0.1 * n, r: 1 }; // argamassa
+    const bv = hash(col, row, 3);
+    const g = fbm(u, v, 32, 3, 5);
+    return { h: 0.65 + 0.2 * g + 0.1 * bv, l: 0.78 + 0.15 * bv + 0.07 * g, r: 0.78 + 0.17 * g };
+  },
+  grass(u, v) {
+    const n = fbm(u, v, 32, 4, 2), f = fbm(u, v, 128, 2, 9);
+    const k = 0.6 * n + 0.4 * f;
+    return { h: k, l: 0.75 + 0.25 * k, r: 0.95 };
+  },
+  asphalt(u, v, x, y) {
+    const sp = hash(x, y, 11), n = fbm(u, v, 16, 3, 4);
+    return { h: 0.4 + 0.4 * sp + 0.2 * n, l: 0.7 + 0.2 * n + 0.1 * sp, r: 0.85 + 0.1 * sp };
+  },
+  stone(u, v, x, y, s) {
+    const sz = s / 4, j = 3;
+    const n = fbm(u, v, 24, 3, 6);
+    if (x % sz < j || y % sz < j) return { h: 0.1, l: 0.55, r: 1 }; // junta
+    const id = hash(Math.floor(x / sz), Math.floor(y / sz), 7);
+    return { h: 0.7 + 0.2 * n, l: 0.82 + 0.1 * id + 0.08 * n, r: 0.7 + 0.25 * n };
+  },
+  wood(u, v, x, y, s) {
+    const g = tnoise(u, v, 2, 48, 1) * 0.6 + tnoise(u, v, 4, 96, 2) * 0.4; // veios ao longo de u
+    if (y % (s / 4) < 2) return { h: 0.05, l: 0.4, r: 1 }; // fresta entre tábuas
+    return { h: 0.5 + 0.4 * g, l: 0.65 + 0.3 * g, r: 0.6 + 0.3 * g };
+  },
+  bark(u, v) {
+    const g = tnoise(u, v, 48, 3, 3) * 0.6 + tnoise(u, v, 96, 6, 4) * 0.4; // sulcos ao longo de v
+    return { h: g, l: 0.55 + 0.45 * g, r: 0.95 };
+  },
+};
+const PBR_SIZE = { grass: 512 };                         // padrão: 256
+const NORMAL_STRENGTH = { brick: 4, stone: 4, asphalt: 3, grass: 2.5, wood: 2.5, bark: 3 };
+
+function proceduralTextures(kind) {
+  const size = PBR_SIZE[kind] ?? 256;
+  const fn = PATTERNS[kind];
+  const H = new Float32Array(size * size);
+  const mk = () => {
+    const c = document.createElement('canvas');
+    c.width = c.height = size;
+    const ctx = c.getContext('2d');
+    return { c, ctx, img: ctx.createImageData(size, size) };
+  };
+  const col = mk(), rou = mk(), nor = mk();
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const o = fn(x / size, y / size, x, y, size);
+      const i = y * size + x, p = i * 4;
+      H[i] = o.h;
+      const l = Math.round(THREE.MathUtils.clamp(o.l, 0, 1) * 255);
+      const r = Math.round(THREE.MathUtils.clamp(o.r, 0, 1) * 255);
+      col.img.data.set([l, l, l, 255], p);
+      rou.img.data.set([r, r, r, 255], p);
+    }
+  }
+  // normal map (convenção OpenGL, Y para cima) por diferenças finitas com wrap
+  const k = NORMAL_STRENGTH[kind] ?? 3;
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const hl = H[y * size + (x - 1 + size) % size];
+      const hr = H[y * size + (x + 1) % size];
+      const hu = H[((y - 1 + size) % size) * size + x];
+      const hd = H[((y + 1) % size) * size + x];
+      let nx = -(hr - hl) * k, ny = (hd - hu) * k, nz = 1;
+      const len = Math.hypot(nx, ny, nz);
+      nx /= len; ny /= len; nz /= len;
+      nor.img.data.set([(nx * 0.5 + 0.5) * 255, (ny * 0.5 + 0.5) * 255, (nz * 0.5 + 0.5) * 255, 255], (y * size + x) * 4);
+    }
+  }
+  const toTex = (m, srgb) => {
+    m.ctx.putImageData(m.img, 0, 0);
+    const t = new THREE.Texture(m.c);
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.anisotropy = MAX_ANISO;
+    if (srgb) t.colorSpace = THREE.SRGBColorSpace;
+    t.needsUpdate = true;
+    return t;
+  };
+  return { map: toTex(col, true), normalMap: toTex(nor, false), roughnessMap: toTex(rou, false) };
+}
+
+const pbrBase = new Map();
+/** Material PBR com cor, normal map e roughness map. `repeat` = nº de repetições da textura na face. */
+function pbr(kind, repeat = [1, 1], { normalScale = 1, ...params } = {}) {
+  if (!pbrBase.has(kind)) pbrBase.set(kind, proceduralTextures(kind));
+  const b = pbrBase.get(kind);
+  const cl = (t) => {
+    const c = t.clone(); // compartilha a imagem (Source); só muda o repeat
+    c.needsUpdate = true;
+    c.repeat.set(repeat[0], repeat[1]);
+    return c;
+  };
+  return new THREE.MeshStandardMaterial({
+    color: 0xffffff,
+    roughness: 1,   // multiplica o roughnessMap
+    metalness: 0,
+    map: cl(b.map),
+    normalMap: cl(b.normalMap),
+    roughnessMap: cl(b.roughnessMap),
+    normalScale: new THREE.Vector2(normalScale, normalScale),
+    ...params,
+  });
+}
+/** Mesmo que pbr(), mas com repeat calculado a partir do tamanho da superfície (tile em metros). */
+const tiled = (kind, w, d, tile = 4, opts) => pbr(kind, [w / tile, d / tile], opts);
 
 
 const WORLD_HALF = 30;
@@ -219,8 +420,8 @@ function addCyl(parent, rTop, rBot, h, material, x, y, z, segments = 12) {
 }
 
 
-function flat(w, d, color, x, z, y) {
-  const m = new THREE.Mesh(new THREE.PlaneGeometry(w, d), mat(color, 1));
+function flat(w, d, material, x, z, y) {
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(w, d), material);
   m.rotation.x = -Math.PI / 2;
   m.position.set(x, y, z);
   m.receiveShadow = true;
@@ -229,27 +430,26 @@ function flat(w, d, color, x, z, y) {
 }
 
 
-const ground = new THREE.Mesh(
-  new THREE.PlaneGeometry(240, 240),
-  new THREE.MeshStandardMaterial({ color: 0x7d8f4c, roughness: 1 })
-);
+// --- materiais do terreno (M4) ---
+const grassMat = tiled('grass', 240, 240, 4, { color: 0xa9bd6a, normalScale: 0.8 });
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(240, 240), grassMat);
 ground.rotation.x = -Math.PI / 2;
 ground.receiveShadow = true;
 scene.add(ground);
 
-const ROAD = 0x4a4a4f;
-const SIDEWALK = 0xbfb6a4;
-const PATH = 0xcfc3aa;
+const ROAD_TINT = 0x77777d;
+const SIDEWALK_TINT = 0xd6cdbb;
+const PATH_TINT = 0xe0d4ba;
 
 // rua em anel
-flat(28, 5, ROAD, 0, -11.5, 0.02); // norte
-flat(28, 5, ROAD, 0, 11.5, 0.02);  // sul
-flat(5, 18, ROAD, -11.5, 0, 0.02); // oeste
-flat(5, 18, ROAD, 11.5, 0, 0.02);  // leste
+flat(28, 5, tiled('asphalt', 28, 5, 4, { color: ROAD_TINT }), 0, -11.5, 0.02); // norte
+flat(28, 5, tiled('asphalt', 28, 5, 4, { color: ROAD_TINT }), 0, 11.5, 0.02);  // sul
+flat(5, 18, tiled('asphalt', 5, 18, 4, { color: ROAD_TINT }), -11.5, 0, 0.02); // oeste
+flat(5, 18, tiled('asphalt', 5, 18, 4, { color: ROAD_TINT }), 11.5, 0, 0.02);  // leste
 
 // linha central tracejada
 const dashGeo = new THREE.PlaneGeometry(1, 0.12);
-const dashMat = mat(0xe3c04a, 1);
+const dashMat = mat(0xe3c04a, 0.8);
 function dash(x, z, rotated) {
   const d = new THREE.Mesh(dashGeo, dashMat);
   d.rotation.x = -Math.PI / 2;
@@ -267,26 +467,27 @@ for (let i = -7; i <= 7; i += 2) {
 }
 
 
-flat(32, 2, SIDEWALK, 0, -15, 0.04);
-flat(32, 2, SIDEWALK, 0, 15, 0.04);
-flat(2, 28, SIDEWALK, -15, 0, 0.04);
-flat(2, 28, SIDEWALK, 15, 0, 0.04);
+flat(32, 2, tiled('stone', 32, 2, 2, { color: SIDEWALK_TINT }), 0, -15, 0.04);
+flat(32, 2, tiled('stone', 32, 2, 2, { color: SIDEWALK_TINT }), 0, 15, 0.04);
+flat(2, 28, tiled('stone', 2, 28, 2, { color: SIDEWALK_TINT }), -15, 0, 0.04);
+flat(2, 28, tiled('stone', 2, 28, 2, { color: SIDEWALK_TINT }), 15, 0, 0.04);
 
 
-flat(2.4, 18, PATH, 0, 0, 0.04);
-flat(18, 2.4, PATH, 0, 0, 0.04);
-const plaza = new THREE.Mesh(new THREE.CircleGeometry(3.8, 40), mat(PATH, 1));
+flat(2.4, 18, tiled('stone', 2.4, 18, 2, { color: PATH_TINT }), 0, 0, 0.04);
+flat(18, 2.4, tiled('stone', 18, 2.4, 2, { color: PATH_TINT }), 0, 0, 0.04);
+const plaza = new THREE.Mesh(new THREE.CircleGeometry(3.8, 40), pbr('stone', [3.8, 3.8], { color: PATH_TINT }));
 plaza.rotation.x = -Math.PI / 2;
 plaza.position.y = 0.05;
 plaza.receiveShadow = true;
 scene.add(plaza);
 
 
+// --- decoração de outono ---
 const pumpkinGeo = new THREE.SphereGeometry(0.28, 12, 10);
-const pumpkinMat = mat(0xe07a1f, 0.7);
-const stemMat = mat(0x4a5a2a, 1);
-const hayMat = mat(0xd4b25a, 1);
-const cornMat = mat(0xc9a85a, 1);
+const pumpkinMat = mat(0xe07a1f, 0.55);
+const stemMat = pbr('bark', [1, 1], { color: 0x5a6a30 });
+const hayMat = pbr('bark', [2, 1], { color: 0xdcbc62 });   // sulcos viram "palha"
+const cornMat = pbr('bark', [1, 2], { color: 0xcfae5e });
 
 function addPumpkin(parent, x, z, s = 1, y = 0.03) {
   const p = new THREE.Mesh(pumpkinGeo, pumpkinMat);
@@ -326,11 +527,13 @@ function decorCluster(parent, x, z) {
   addCornStalks(parent, x - 0.2, z - 0.55);
 }
 
+const wreathMat = mat(0xb5402a, 0.8);
+const bowMat = mat(0xd4a02a, 0.5, { metalness: 0.3 });
 function addWreath(parent, x, y, z, r = 0.28) {
-  const w = new THREE.Mesh(new THREE.TorusGeometry(r, r * 0.26, 8, 20), mat(0xb5402a, 0.8));
+  const w = new THREE.Mesh(new THREE.TorusGeometry(r, r * 0.26, 8, 20), wreathMat);
   w.position.set(x, y, z);
   parent.add(w);
-  const bow = new THREE.Mesh(new THREE.BoxGeometry(r * 0.7, r * 0.35, 0.04), mat(0xd4a02a, 0.6));
+  const bow = new THREE.Mesh(new THREE.BoxGeometry(r * 0.7, r * 0.35, 0.04), bowMat);
   bow.position.set(x, y - r, z + 0.03);
   parent.add(bow);
 }
@@ -366,26 +569,33 @@ function signTexture(text, bg = '#2b2118', fg = '#f1e2b3') {
   ctx.fillText(text, 256, 68);
   const t = new THREE.CanvasTexture(c);
   t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = MAX_ANISO;
   return t;
 }
 
 function makeSign(text, w = 2.8, bg, fg) {
   return new THREE.Mesh(
     new THREE.BoxGeometry(w, w / 4, 0.08),
-    new THREE.MeshStandardMaterial({ map: signTexture(text, bg, fg), roughness: 0.7 })
+    new THREE.MeshStandardMaterial({ map: signTexture(text, bg, fg), roughness: 0.55, metalness: 0.1 })
   );
 }
 
-const glassMat = mat(0xbfd8e0, 0.2, { emissive: 0x2a3a40, emissiveIntensity: 0.4 });
-const frameMat = mat(0xf4efe2, 0.7);
-const creamMat = mat(0xefe6cf, 0.8);
-const roofMat = mat(0x5a4f48, 0.9);
+// vidro: liso (roughness baixa) para refletir o environment map
+const glassMat = mat(0xbfd8e0, 0.06, { metalness: 0.15, envMapIntensity: 1.6, emissive: 0x2a3a40, emissiveIntensity: 0.25 });
+const frameMat = mat(0xf4efe2, 0.6);
+const creamMat = pbr('stone', [4, 1], { color: 0xefe6cf, normalScale: 0.6 }); // cornijas
+const roofMat = pbr('asphalt', [3, 3], { color: 0x8a7f78 });
+const chimneyMat = pbr('brick', [1, 2], { color: 0x8a4630 });
+const stepMat = pbr('stone', [4, 1], { color: 0xc4bcac });
+const doorMat = (awning) => mat(awning, 0.45, { metalness: 0.05 });
 
 function buildShop({ w, d, h, color, awning, name }) {
   const g = new THREE.Group();
   const front = d / 2;
 
-  addBox(g, w, h, d, mat(color, 0.85), 0, h / 2, 0);                  // corpo
+  // fachada de tijolo: 1 repetição da textura ≈ 1,2 m (4 tijolos x 8 fiadas)
+  const bodyMat = pbr('brick', [w / 1.2, h / 1.2], { color, normalScale: 1.2 });
+  addBox(g, w, h, d, bodyMat, 0, h / 2, 0);                           // corpo
   addBox(g, w + 0.3, 0.4, d + 0.3, creamMat, 0, h + 0.2, 0);          // cornija
   addBox(g, w - 0.2, 0.1, d - 0.2, roofMat, 0, h + 0.45, 0);          // telhado plano
   addBox(g, w + 0.1, 0.5, 0.1, creamMat, 0, 0.25, front + 0.03);      // rodapé
@@ -394,7 +604,7 @@ function buildShop({ w, d, h, color, awning, name }) {
   addBox(g, w * 0.5 + 0.2, 2.2, 0.08, frameMat, -w * 0.2, 1.9, front + 0.03, false);
   addBox(g, w * 0.5, 2.0, 0.1, glassMat, -w * 0.2, 1.9, front + 0.06, false);
   addBox(g, 1.3, 2.5, 0.08, frameMat, w * 0.3, 1.25, front + 0.03, false);
-  addBox(g, 1.1, 2.3, 0.1, mat(awning, 0.6), w * 0.3, 1.2, front + 0.06, false);
+  addBox(g, 1.1, 2.3, 0.1, doorMat(awning), w * 0.3, 1.2, front + 0.06, false);
   addWreath(g, w * 0.3, 1.75, front + 0.14);
 
   // janelas do andar de cima
@@ -414,7 +624,7 @@ function buildShop({ w, d, h, color, awning, name }) {
   g.add(sign);
 
   // chaminé em alguns prédios
-  if (rand() > 0.5) addBox(g, 0.7, 1.6, 0.7, mat(0x7a3a28, 0.9), w * 0.3, h + 1.2, -d * 0.2);
+  if (rand() > 0.5) addBox(g, 0.7, 1.6, 0.7, chimneyMat, w * 0.3, h + 1.2, -d * 0.2);
 
   // decoração na calçada
   decorCluster(g, -w * 0.4, front + 0.9);
@@ -425,19 +635,20 @@ function buildShop({ w, d, h, color, awning, name }) {
 function buildTownHall(w, d, h) {
   const g = new THREE.Group();
   const front = d / 2;
-  const white = mat(0xf0ebe0, 0.7);
   const pw = w * 0.8;
+  const white = pbr('stone', [w / 2, h / 2], { color: 0xf0ebe0, normalScale: 0.7 }); // pedra clara
+  const whiteCol = pbr('stone', [1, 3], { color: 0xf0ebe0, normalScale: 0.5 });      // colunas
 
   addBox(g, w, h, d, white, 0, h / 2, 0);
   addBox(g, w + 0.3, 0.4, d + 0.3, creamMat, 0, h + 0.2, 0);
   addBox(g, w - 0.2, 0.1, d - 0.2, roofMat, 0, h + 0.45, 0);
 
   // degrau + varanda
-  g.userData.step = addBox(g, pw + 0.4, 0.3, 2.2, mat(0xb8b0a0, 1), 0, 0.15, front + 1.1);
+  g.userData.step = addBox(g, pw + 0.4, 0.3, 2.2, stepMat, 0, 0.15, front + 1.1);
   const cols = 4;
   for (let i = 0; i < cols; i++) {
     const x = -pw / 2 + 0.4 + i * ((pw - 0.8) / (cols - 1));
-    addCyl(g, 0.2, 0.22, 3.6, white, x, 2.1, front + 1.8, 14);
+    addCyl(g, 0.2, 0.22, 3.6, whiteCol, x, 2.1, front + 1.8, 14);
   }
   addBox(g, pw, 0.35, 2, white, 0, 4.075, front + 1);
 
@@ -447,13 +658,13 @@ function buildTownHall(w, d, h) {
   s.lineTo(pw / 2, 0);
   s.lineTo(0, 1.1);
   s.closePath();
-  const ped = new THREE.Mesh(new THREE.ExtrudeGeometry(s, { depth: 2, bevelEnabled: false }), white);
+  const ped = new THREE.Mesh(new THREE.ExtrudeGeometry(s, { depth: 2, bevelEnabled: false }), mat(0xf0ebe0, 0.7));
   ped.position.set(0, 4.25, front);
   ped.castShadow = true;
   g.add(ped);
 
   // porta dupla, janelas, letreiro
-  addBox(g, 1.8, 2.6, 0.1, mat(0x2f6b4a, 0.6), 0, 1.45, front + 0.05, false);
+  addBox(g, 1.8, 2.6, 0.1, mat(0x2f6b4a, 0.45), 0, 1.45, front + 0.05, false);
   for (const x of [-w * 0.35, w * 0.35]) {
     addBox(g, 1.1, 1.8, 0.08, frameMat, x, 1.9, front + 0.03, false);
     addBox(g, 0.9, 1.6, 0.1, glassMat, x, 1.9, front + 0.06, false);
@@ -501,18 +712,20 @@ SIDES.forEach((side, si) => {
   });
 });
 
+// metal: metalness alto só faz sentido COM environment map (senão fica preto)
+const ironMat = mat(0x1f1f22, 0.4, { metalness: 0.85 });
+
 function addLamp(x, z) {
   const g = new THREE.Group();
-  const dark = mat(0x1f1f22, 0.5);
-  addCyl(g, 0.15, 0.2, 0.5, dark, 0, 0.25, 0, 10);
-  addCyl(g, 0.06, 0.08, 3.2, dark, 0, 1.9, 0, 10);
+  addCyl(g, 0.15, 0.2, 0.5, ironMat, 0, 0.25, 0, 10);
+  addCyl(g, 0.06, 0.08, 3.2, ironMat, 0, 1.9, 0, 10);
   const lamp = new THREE.Mesh(
     new THREE.SphereGeometry(0.22, 12, 10),
-    new THREE.MeshStandardMaterial({ color: 0xfff2c0, emissive: 0xffe39a, emissiveIntensity: 0.9 })
+    new THREE.MeshStandardMaterial({ color: 0xfff2c0, emissive: 0xffe39a, emissiveIntensity: 0.9, roughness: 0.3 })
   );
   lamp.position.y = 3.6;
   g.add(lamp);
-  addCyl(g, 0.12, 0.12, 0.08, dark, 0, 3.35, 0, 10);
+  addCyl(g, 0.12, 0.12, 0.08, ironMat, 0, 3.35, 0, 10);
   addWreath(g, 0, 2.4, 0.1, 0.26);
   g.position.set(x, 0, z);
   scene.add(g);
@@ -531,14 +744,13 @@ for (const p of [-6, 6]) {
   addLamp(14.6, p);
 }
 
+const benchWood = pbr('wood', [1, 1], { color: 0x4a7a54, normalScale: 0.8 }); // madeira pintada de verde
 function addBench(x, z, rotY) {
   const g = new THREE.Group();
-  const wood = mat(0x2e4a33, 0.8);
-  const iron = mat(0x1f1f22, 0.5);
-  addBox(g, 1.6, 0.08, 0.5, wood, 0, 0.5, 0);
-  addBox(g, 1.6, 0.45, 0.06, wood, 0, 0.8, -0.24);
-  addBox(g, 0.06, 0.5, 0.5, iron, -0.7, 0.25, 0);
-  addBox(g, 0.06, 0.5, 0.5, iron, 0.7, 0.25, 0);
+  addBox(g, 1.6, 0.08, 0.5, benchWood, 0, 0.5, 0);
+  addBox(g, 1.6, 0.45, 0.06, benchWood, 0, 0.8, -0.24);
+  addBox(g, 0.06, 0.5, 0.5, ironMat, -0.7, 0.25, 0);
+  addBox(g, 0.06, 0.5, 0.5, ironMat, 0.7, 0.25, 0);
   g.position.set(x, 0, z);
   g.rotation.y = rotY;
   scene.add(g);
@@ -551,13 +763,13 @@ addBench(-3, -6.5, 0);
 addBench(6.5, 3, -Math.PI / 2);
 addBench(-6.5, 3, Math.PI / 2);
 
+const chairWood = pbr('wood', [1, 1], { color: 0x9a6c3e });
 function addChair(x, z, rotY) {
   const g = new THREE.Group();
-  const wood = mat(0x6b4a2b, 0.7);
-  addBox(g, 0.45, 0.05, 0.45, wood, 0, 0.45, 0);
-  addBox(g, 0.45, 0.45, 0.05, wood, 0, 0.7, -0.2);
+  addBox(g, 0.45, 0.05, 0.45, chairWood, 0, 0.45, 0);
+  addBox(g, 0.45, 0.45, 0.05, chairWood, 0, 0.7, -0.2);
   for (const [dx, dz] of [[-0.19, -0.19], [0.19, -0.19], [-0.19, 0.19], [0.19, 0.19]]) {
-    addBox(g, 0.04, 0.45, 0.04, wood, dx, 0.22, dz);
+    addBox(g, 0.04, 0.45, 0.04, chairWood, dx, 0.22, dz);
   }
   g.position.set(x, 0.03, z);
   g.rotation.y = rotY;
@@ -568,13 +780,13 @@ function addChair(x, z, rotY) {
 const TABLE = { x: 4.55, z: -15 };
 const table = new THREE.Mesh(
   new THREE.BoxGeometry(1.6, 0.1, 0.9),
-  new THREE.MeshStandardMaterial({ color: 0x8b5a2b, roughness: 0.6 })
+  pbr('wood', [1.5, 1], { color: 0xa5703a, normalScale: 0.9 })
 );
 table.position.set(TABLE.x, 0.88, TABLE.z);
 table.castShadow = table.receiveShadow = true;
 scene.add(table);
 for (const [dx, dz] of [[-0.7, -0.35], [0.7, -0.35], [-0.7, 0.35], [0.7, 0.35]]) {
-  const leg = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.8, 0.08), table.material);
+  const leg = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.8, 0.08), chairWood);
   leg.position.set(TABLE.x + dx, 0.43, TABLE.z + dz);
   leg.castShadow = true;
   scene.add(leg);
@@ -585,7 +797,7 @@ addChair(TABLE.x, TABLE.z - 0.85, 0);       // do lado da cafeteria
 // bandeira
 {
   const g = new THREE.Group();
-  addCyl(g, 0.04, 0.06, 6, mat(0xcfcfcf, 0.4), 0, 3, 0, 8);
+  addCyl(g, 0.04, 0.06, 6, mat(0xcfcfcf, 0.3, { metalness: 0.9 }), 0, 3, 0, 8);
   addBox(g, 1.2, 0.7, 0.02, mat(0xb22234, 0.8), 0.65, 5.5, 0, false);
   addBox(g, 0.5, 0.35, 0.03, mat(0x1d3a7a, 0.8), 0.3, 5.68, 0, false);
   g.position.set(3.8, 0, -4.6);
@@ -593,7 +805,8 @@ addChair(TABLE.x, TABLE.z - 0.85, 0);       // do lado da cafeteria
 }
 
 
-const barkMat = mat(0x5b4a3a, 1);
+// casca de árvore com relevo (normal map) e roughness alta
+const barkMat = pbr('bark', [2, 3], { color: 0x6b5744, normalScale: 1.4 });
 
 
 function bareTree(x, z, s = 1) {
@@ -626,7 +839,7 @@ const LEAF_COLORS = [0xd9731c, 0xc0392b, 0xe0a526];
 function autumnTree(x, z, colorIdx) {
   const g = new THREE.Group();
   addCyl(g, 0.2, 0.3, 2.4, barkMat, 0, 1.2, 0, 8);
-  const lm = mat(LEAF_COLORS[colorIdx % LEAF_COLORS.length], 0.9, { flatShading: true });
+  const lm = mat(LEAF_COLORS[colorIdx % LEAF_COLORS.length], 0.85, { flatShading: true });
   for (const [dx, dy, dz, r] of [[0, 3.3, 0, 1.5], [0.9, 2.9, 0.3, 1.1], [-0.8, 3.0, -0.4, 1.2]]) {
     const c = new THREE.Mesh(new THREE.IcosahedronGeometry(r, 1), lm);
     c.position.set(dx, dy, dz);
@@ -645,7 +858,7 @@ autumnTree(7, 7, 0);
 
 // moitas ao redor da praça
 {
-  const bushMat = mat(0x4a6b3a, 1, { flatShading: true });
+  const bushMat = mat(0x4a6b3a, 0.95, { flatShading: true });
   for (let i = 0; i < 8; i++) {
     const a = (i / 8) * Math.PI * 2 + Math.PI / 8;
     const b = new THREE.Mesh(new THREE.IcosahedronGeometry(0.6, 1), bushMat);
@@ -686,11 +899,42 @@ function fitAndPlace(obj, cfg) {
   return holder;
 }
 
+/* M4: o OBJLoader/MTLLoader gera MeshPhongMaterial (modelo antigo, sem roughness/metalness).
+ * Convertemos para MeshStandardMaterial para o OBJ reagir ao environment map e ficar
+ * consistente com o resto da cena (que é PBR). Os mapas que o .mtl trouxer são mantidos. */
+function upgradeMaterial(m) {
+  if (m.isMeshStandardMaterial) return m; // glTF já vem PBR
+  if (!m.isMeshPhongMaterial && !m.isMeshLambertMaterial) return m;
+  const s = new THREE.MeshStandardMaterial({
+    name: m.name,
+    color: m.color,
+    map: m.map,
+    normalMap: m.normalMap,
+    bumpMap: m.bumpMap,
+    bumpScale: m.bumpScale ?? 1,
+    alphaMap: m.alphaMap,
+    transparent: m.transparent,
+    opacity: m.opacity,
+    side: m.side,
+    roughness: 0.55,
+    metalness: 0,
+  });
+  m.dispose();
+  return s;
+}
+
 function enableShadows(obj) {
   obj.traverse((o) => {
-    if (o.isMesh) {
-      o.castShadow = true;
-      o.receiveShadow = true;
+    if (!o.isMesh) return;
+    o.castShadow = true;
+    o.receiveShadow = true;
+    o.material = Array.isArray(o.material) ? o.material.map(upgradeMaterial) : upgradeMaterial(o.material);
+    for (const m of [].concat(o.material)) {
+      // anisotropia em todos os mapas: texturas nítidas em ângulo rasante
+      for (const k of ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'aoMap', 'emissiveMap']) {
+        if (m[k]) m[k].anisotropy = MAX_ANISO;
+      }
+      m.envMapIntensity = 1;
     }
   });
 }
@@ -876,9 +1120,11 @@ function updateNavigation(dt) {
 const state = {
   wireframe: false,        // (1)
   depth: false,            // (2)
-  backfaceCulling: true,   
+  backfaceCulling: true,   // (3)
   showFrustum: true,       // (4)
   frustumCulling: true,    // (5)
+  normalMaps: true,        // (6) M4: mapas de relevo
+  roughnessMaps: true,     // (7) M4: mapas de rugosidade
   near: camera.near,
   far: camera.far,
 };
@@ -886,6 +1132,29 @@ const state = {
 const stats = { drawCalls: 0, triangles: 0, objects: 0, ground: 0, walkHit: '—' };
 
 const depthMat = new THREE.MeshDepthMaterial();
+
+/* M4: liga/desliga normal map e roughness map em TODOS os materiais da cena (inclusive os modelos
+ * carregados depois). Guardamos o mapa original em userData para poder restaurar. Serve para
+ * demonstrar na apresentação o efeito de cada mapa (antes/depois). */
+function applyMaterialToggles() {
+  scene.traverse((o) => {
+    if (!o.isMesh) return;
+    for (const m of [].concat(o.material)) {
+      if (!m.userData.mapsSaved) {
+        m.userData.nm = m.normalMap ?? null;
+        m.userData.rm = m.roughnessMap ?? null;
+        m.userData.mapsSaved = true;
+      }
+      const nm = state.normalMaps ? m.userData.nm : null;
+      const rm = state.roughnessMaps ? m.userData.rm : null;
+      if (m.normalMap !== nm || m.roughnessMap !== rm) {
+        m.normalMap = nm;
+        m.roughnessMap = rm;
+        m.needsUpdate = true;
+      }
+    }
+  });
+}
 
 function applyDiagnostics() {
   scene.overrideMaterial = state.depth ? depthMat : null;
@@ -901,6 +1170,7 @@ function applyDiagnostics() {
     }
   });
 
+  applyMaterialToggles();                                   // (6)(7)
   frustumHelper.visible = state.showFrustum;                // (4)
 }
 
@@ -934,6 +1204,13 @@ lightFolder.add(sun, 'visible').name('Sol (direcional)');
 lightFolder.add(sun, 'intensity', 0, 3, 0.05).name('Intensidade do sol');
 lightFolder.add(sun, 'castShadow').name('Sombras do sol');
 
+// M4: materiais e ambiente
+const matFolder = gui.addFolder('Materiais e ambiente (M4)');
+matFolder.add(state, 'normalMaps').name('6 · Normal maps (relevo)').onChange(applyMaterialToggles);
+matFolder.add(state, 'roughnessMaps').name('7 · Roughness maps').onChange(applyMaterialToggles);
+matFolder.add(scene, 'environmentIntensity', 0, 2, 0.05).name('Intensidade do env map');
+matFolder.add(renderer, 'toneMappingExposure', 0.3, 2, 0.05).name('Exposição (tone mapping)');
+
 const infoFolder = gui.addFolder('renderer.info (passada principal)');
 infoFolder.add(stats, 'drawCalls').name('Draw calls').listen().disable();
 infoFolder.add(stats, 'triangles').name('Triângulos').listen().disable();
@@ -947,6 +1224,8 @@ function handleShortcuts(code) {
     Digit3: 'backfaceCulling',
     Digit4: 'showFrustum',
     Digit5: 'frustumCulling',
+    Digit6: 'normalMaps',
+    Digit7: 'roughnessMaps',
   };
   const prop = map[code];
   if (!prop) return;
