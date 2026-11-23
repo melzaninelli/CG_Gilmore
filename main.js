@@ -4,7 +4,10 @@ import { MTLLoader } from 'three/addons/loaders/MTLLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import GUI from 'lil-gui';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+<<<<<<< HEAD
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
+=======
+>>>>>>> 00b4bcc4f8cee5666182274a1cf36c7ebf8e7c89
 
 
 const MODELS = [
@@ -1149,7 +1152,11 @@ let hw = 0, hwTarget = 0, hwApplied = -1;
 
 // Onde estão os modelos (pasta própria para cada um) + ajustes de tamanho e direção da frente
 const HW_ASSETS = {
+<<<<<<< HEAD
   ghost:   { name: 'Fantasma', url: '/models/ghost_phantom/scene.gltf', height: 2.2, yaw: 0, animate: true },
+=======
+  ghost:   { name: 'Fantasma', url: '/models/ghost_phantom/scene.gltf', height: 2.2, yaw: 0 },
+>>>>>>> 00b4bcc4f8cee5666182274a1cf36c7ebf8e7c89
   pumpkin: { name: 'Abóbora',  url: '/models/pumpkin/scene.gltf',       height: 0.6, yaw: 0 },
 };
 
@@ -1320,7 +1327,11 @@ function setupGhostModel(obj, url) {
     if (!o.isMesh) return;
     // o glTF usa pbrSpecularGlossiness (não suportado nas versões novas do three): refazemos o material
     const m = new THREE.MeshStandardMaterial({
+<<<<<<< HEAD
       map: diffuse, emissiveMap: emissive,
+=======
+      map: o.material.map ?? diffuse, emissiveMap: o.material.emissiveMap ?? emissive,
+>>>>>>> 00b4bcc4f8cee5666182274a1cf36c7ebf8e7c89
       emissive: 0xffffff, emissiveIntensity: 0.9, color: 0xffffff, roughness: 0.6,
       transparent: true, opacity: 0, fog: false, depthWrite: false,
     });
@@ -1335,7 +1346,10 @@ function setupPumpkinModel(obj) {
   obj.traverse((o) => {
     if (!o.isMesh) return;
     for (const m of [].concat(o.material)) {
+<<<<<<< HEAD
       if (m.map && m.map.image && m.map.image.width <= 1) { m.map = null; m.color.setHex(0xd9650f); } // carregou sem textura
+=======
+>>>>>>> 00b4bcc4f8cee5666182274a1cf36c7ebf8e7c89
       if (m.map) m.emissiveMap = m.map;
       m.emissive = new THREE.Color(0xff6a10);
       m.emissiveIntensity = 0.55; // brilho de lanterna
@@ -1344,6 +1358,7 @@ function setupPumpkinModel(obj) {
   });
 }
 
+<<<<<<< HEAD
 const BLANK_PX = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
 async function loadHwTemplate(cfg, fallback, setup) {
   // 3 tentativas: caminho normal; texturas na mesma pasta do .gltf; sem texturas (só a malha)
@@ -1370,6 +1385,20 @@ async function loadHwTemplate(cfg, fallback, setup) {
   }
   console.warn(`[halloween] ${cfg.name}: usando modelo de reserva (${cfg.url} não carregou)`);
   return fallback(cfg);
+=======
+async function loadHwTemplate(cfg, fallback, setup) {
+  try {
+    const gltf = await gltfLoader.loadAsync(cfg.url);
+    const obj = gltf.scene;
+    enableShadows(obj);
+    setup(obj, cfg.url);
+    console.log(`[halloween] ${cfg.name} carregado de ${cfg.url}`);
+    return fitAndPlace(obj, { name: cfg.name, height: cfg.height, position: [0, 0, 0], rotationY: 0 });
+  } catch (err) {
+    console.warn(`[halloween] ${cfg.name}: usando modelo de reserva (${cfg.url} não carregou)`, err);
+    return fallback(cfg);
+  }
+>>>>>>> 00b4bcc4f8cee5666182274a1cf36c7ebf8e7c89
 }
 
 function spawnPumpkins(tpl) {
@@ -1390,6 +1419,7 @@ function spawnGhosts(tpl) {
     const low = i >= 14; // 3 fantasmas "correndo" perto do chão
     const w = new THREE.Group();
     w.rotation.order = 'YXZ';
+<<<<<<< HEAD
     // SkeletonUtils.clone: clone() comum de modelo com esqueleto deixa todas as cópias presas na origem
     const m = SkeletonUtils.clone(tpl);
     m.rotation.y = HW_ASSETS.ghost.yaw;
@@ -1402,6 +1432,11 @@ function spawnGhosts(tpl) {
       act.play();
       act.time = hrand() * clips[0].duration;
     }
+=======
+    const m = tpl.clone(true);
+    m.rotation.y = HW_ASSETS.ghost.yaw;
+    w.add(m);
+>>>>>>> 00b4bcc4f8cee5666182274a1cf36c7ebf8e7c89
     w.scale.setScalar(low ? 1.1 : 1.2 + hrand() * 0.7);
     ghostGroup.add(w);
     ghosts.push({
@@ -1410,10 +1445,15 @@ function spawnGhosts(tpl) {
       h: low ? 0.3 : 6 + hrand() * 14,
       spd: (low ? 0.5 : 0.25 + hrand() * 0.5) * (hrand() < 0.5 ? -1 : 1),
       ph: hrand() * Math.PI * 2,
+<<<<<<< HEAD
       mixer,
     });
   }
   console.log(`[halloween] ${ghosts.length} fantasmas criados`);
+=======
+    });
+  }
+>>>>>>> 00b4bcc4f8cee5666182274a1cf36c7ebf8e7c89
 }
 
 async function initHalloweenAssets() {
@@ -1599,7 +1639,10 @@ function updateHalloween(dt, tms) {
   stars.position.copy(camera.position);
 
   for (const gh of ghosts) {
+<<<<<<< HEAD
     gh.mixer?.update(dt);
+=======
+>>>>>>> 00b4bcc4f8cee5666182274a1cf36c7ebf8e7c89
     const a = gh.ph + t * gh.spd, dir = Math.sign(gh.spd);
     gh.g.position.set(Math.cos(a) * gh.R, gh.h + Math.sin(t * 2.2 + gh.ph * 3) * (gh.low ? 0.25 : 1.2), Math.sin(a) * gh.R);
     gh.g.rotation.y = Math.atan2(-Math.sin(a) * dir, Math.cos(a) * dir);
