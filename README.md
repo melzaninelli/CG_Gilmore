@@ -203,6 +203,28 @@ Otimizações e detalhes:
 - Durante o raio, os materiais são tratados como `DoubleSide`, para que o chão não dependa da orientação das faces do modelo.
 - O limite norte do jogador (`PLAYER_LIMIT`) é liberado em frente à cafeteria (`enterDepth`), para que a escada seja alcançável.
 - O painel de diagnóstico mostra a *Altura do chão* e a malha sobre a qual o jogador está pisando.
+- 
+## Modo Halloween
+
+**Como ativar:** falar com a bruxa na praça (`E`, a até 3,2 m) ou apertar `H`. A transição leva cerca de 3,5 s, com um clarão de tela. Falando com ela de novo, ou apertando `H`, a cidade volta ao normal.
+
+| Elemento | O que acontece |
+|---|---|
+| Céu e névoa | Noite roxa; a névoa fica mais curta |
+| Iluminação | Luz hemisférica roxa, sol vira luar azulado, environment map reduzido, exposição um pouco maior, 4 luzes laranja piscando na praça |
+| Texturas e materiais | Todos os materiais PBR recebem um tint roxo (a cor original fica em `userData.hwBase`), a grama seca, as janelas acendem em laranja e os postes brilham em verde |
+| Céu | Lua com halo, 350 estrelas (acompanham a câmera) e raios aleatórios |
+| Abóboras (~90) | Calçadas, anel da praça, caminhos, telhados e 4 gigantes; nascem em sequência com efeito de "pop" e brilho de lanterna |
+| Fantasmas (17) | 14 voando em círculos pelo céu e 3 mais baixos "correndo" perto do chão, com balanço e inclinação; materiais com `fog: false` para continuarem visíveis na névoa |
+| Bruxa (NPC) | Capa, chapéu, vassoura e abóbora flutuante; vira para o jogador, tem um "!" acima da cabeça e balão de diálogo; é um obstáculo na praça |
+
+**Modelos e reserva.** `HW_ASSETS` aponta para `/models/ghost_phantom/scene.gltf` e `/models/pumpkin/scene.gltf`. O carregamento tenta, em ordem: (1) o caminho normal; (2) texturas na mesma pasta do `.gltf`; (3) sem texturas. Se tudo falhar, usa um fantasma e uma abóbora gerados por código. O console mostra qual caminho foi usado (procure `[halloween]`).
+
+**Detalhes técnicos.**
+
+- Os fantasmas são clonados com `SkeletonUtils.clone`. Um `clone()` comum de um modelo com esqueleto deixa todas as cópias presas na origem.
+- O fantasma baixado usa o material antigo *pbrSpecularGlossiness*, não suportado nas versões novas do Three.js. Por isso o material é refeito no código com as texturas `Fantasma_diffuse` e `Fantasma_emissive`.
+- Se o modelo tiver animação própria, ela toca em cada fantasma com início aleatório (`animate: true` em `HW_ASSETS.ghost`).
 
 **Limitação conhecida:** A colisão é por zonas retangulares (praça, interiores, corredores de porta e móveis), não por geometria. Dentro da Cafeteria Salle (modelo externo) o jogador só é limitado por enterDepth e pela largura do modelo, então pode atravessar corrimãos e paredes do próprio modelo.
 A câmera em terceira pessoa não colide com paredes.
