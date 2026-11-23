@@ -66,23 +66,23 @@ Desenvolver uma aplicação gráfica interativa utilizando Three.js, permitindo 
 ## 🎮 Controles
 
 Controles
-|Tecla / controle	|Ação|
-|Clique na tela|	Captura o mouse (pointer lock) ; Esc libera|
-|Mouse|	Controla a visão da câmera|
-|W A S D|	Andar|
-|Shift|	Correr (2x)|
-|Setas	Girar e inclinar a câmera|
-|E	|Falar com a bruxa / avançar o diálogo|
-|H|	Liga e desliga o Halloween|
-|V|	Alterna primeira e terceira pessoa|
-|1	|Wireframe|
-|2	|Profundidade (depth)|
-|3|	Back-face culling|
-|4|	Mostrar frustum e minimapa|
-|5|	Frustum culling|
-|6|	Normal maps|
+|Tecla / controle	| Ação|
+|Clique na tela |	Captura o mouse (pointer lock) ; Esc libera|
+|Mouse |	Controla a visão da câmera|
+|W A S D |	Andar|
+|Shift |	Correr (2x)|
+|Setas |	Girar e inclinar a câmera|
+|E	| Falar com a bruxa / avançar o diálogo|
+|H |	Liga e desliga o Halloween|
+|V |	Alterna primeira e terceira pessoa|
+|1	| Wireframe|
+|2	| Profundidade (depth)|
+|3 |	Back-face culling|
+|4 |	Mostrar frustum e minimapa|
+|5 |	Frustum culling|
+|6 |	Normal maps|
 |7	|Roughness maps|
-|Painel de diagnóstico|	Ajustar opções de visualização gráfica, câmera e iluminação|
+|Painel de diagnóstico |	Ajustar opções de visualização gráfica, câmera e iluminação|
 
 *Os controles serão atualizados conforme a implementação final.*
 
