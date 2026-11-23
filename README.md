@@ -65,14 +65,24 @@ Desenvolver uma aplicação gráfica interativa utilizando Three.js, permitindo 
 
 ## 🎮 Controles
 
-| Tecla/controle | Ação |
-|---|---|
-| W / ↑ | Movimentar para frente |
-| S / ↓ | Movimentar para trás |
-| A / ← | Movimentar para a esquerda |
-| D / → | Movimentar para a direita |
-| Mouse | Controlar a visão da câmera, se implementado |
-| Painel de diagnóstico | Ajustar opções de visualização gráfica |
+Controles
+Tecla / controle	Ação
+Clique na tela	Captura o mouse (pointer lock); Esc libera
+Mouse	Controla a visão da câmera
+W A S D	Andar
+Shift	Correr (2x)
+Setas	Girar e inclinar a câmera
+E	Falar com a bruxa / avançar o diálogo
+H	Liga e desliga o Halloween
+V	Alterna primeira e terceira pessoa
+1	Wireframe
+2	Profundidade (depth)
+3	Back-face culling
+4	Mostrar frustum e minimapa
+5	Frustum culling
+6	Normal maps
+7	Roughness maps
+Painel de diagnóstico	Ajustar opções de visualização gráfica, câmera e iluminação
 
 *Os controles serão atualizados conforme a implementação final.*
 
@@ -116,8 +126,8 @@ O cenário utilizará pelo menos três modelos 3D externos, integrados à compos
 | Wooden Gazebo | GLTF | Andrew Weems |
 | CAFETERIA SALLE | GLTF | Karen Rocha |
 | Coffe Cup | OBJ | https://www.cgtrader.com/designers/jd-imagery?utm_source=credit&utm_source=credit_item_page|
-
-Os créditos, autores, fontes originais e licenças de uso serão registrados nesta documentação.
+| Fantasma Ghost Phantom | glTF| Fantasmas do Halloween | Marcos.Andre (CC Attribution)|
+|Pumpkin | glTF|	Abóboras do Halloween | [autor / licença]|
 
 ### 5. Navegação
 
@@ -129,26 +139,22 @@ Exemplo de organização sugerida:
 
 ```text
 CG_Gilmore/
-├── public/
-│   └── models/            
-├── src/
-│   ├── main.js            
-│   ├── scene.js           
-│   ├── camera.js          
-│   ├── lights.js          
-│   ├── controls.js        
-│   ├── diagnostics.js     
-│   ├── models.js          
-│   ├── terrain.js         
-│   ├── buildings.js       
-│   ├── props.js           
-│   ├── decor.js           
-│   ├── utils.js           
-│   └── config.js          
-├── index.html
-├── package.json
-├── .gitignore
-└── README.md
+└── vite-project/
+    ├── index.html
+    ├── main.js                     ← toda a cena (renderer, luzes, texturas, cidade, navegação, Halloween)
+    ├── package.json
+    ├── .gitignore
+    ├── README.md
+    ├── public/
+    │   └── models/
+    │       ├── wooden_gazebo/
+    │       ├── cafeteria_salle/
+    │       ├── antique_coffee_mill/
+    │       ├── starbucks_disposable_cup/
+    │       ├── SB-CoffeeCupXmas-MODEL/SB-CoffeeCupXmas-MODEL/   (.obj + .mtl)
+    │       ├── ghost_phantom/      (scene.gltf, scene.bin, license.txt, textures/)
+    │       └── pumpkin/            (scene.gltf, scene.bin, license.txt, textures/)
+    └── src/                       
 ```
 
 ## Iluminação e sombras
@@ -196,7 +202,10 @@ Otimizações e detalhes:
 - O limite norte do jogador (`PLAYER_LIMIT`) é liberado em frente à cafeteria (`enterDepth`), para que a escada seja alcançável.
 - O painel de diagnóstico mostra a *Altura do chão* e a malha sobre a qual o jogador está pisando.
 
-**Limitação conhecida:** não há detecção de colisão com paredes, apenas ajuste de altura. O jogador pode atravessar paredes e corrimãos; o `enterDepth` limita até onde ele entra na cafeteria.
+**Limitação conhecida:** A colisão é por zonas retangulares (praça, interiores, corredores de porta e móveis), não por geometria. Dentro da Cafeteria Salle (modelo externo) o jogador só é limitado por enterDepth e pela largura do modelo, então pode atravessar corrimãos e paredes do próprio modelo.
+A câmera em terceira pessoa não colide com paredes.
+A transformação de Halloween altera a cor das texturas (tint) em vez de trocar as texturas por outras.
+Os interiores e o Halloween têm custo alto em draw calls em computadores mais simples.
 
 ## Nota de transparência de IA
 
