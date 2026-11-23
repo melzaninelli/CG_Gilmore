@@ -3,6 +3,7 @@ import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { MTLLoader } from 'three/addons/loaders/MTLLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import GUI from 'lil-gui';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
 
 const MODELS = [
@@ -23,8 +24,10 @@ const MODELS = [
     height: 6,
     rotationY: 0,
     fallbackSize: [6.5, 6, 6],
-    walkable: true,   // escada e varanda da cafeteria
-    enterDepth: 2.5,  // quantos metros, a partir da frente do modelo, o jogador pode avançar (escada + varanda)
+    maxWidth: 6.3,    // não invade o slot vizinho (Kim's Antiques / prédio da esquerda)
+    maxDepth: 6,      // não passa da profundidade das lojas
+    walkable: true,   // escada, varanda e interior da cafeteria
+    enterDepth: 6,    // quantos metros, a partir da frente do modelo, o jogador pode avançar (até o balcão)
   },
   {
     name: 'Antique Coffee Mill',
@@ -83,7 +86,7 @@ const EYE_HEIGHT = 1.7;
 camera.position.set(0, EYE_HEIGHT, 12);
 
 /* Superfícies "caminháveis" (escadas, pisos elevados). A altura do chão sob o jogador
- * é obtida lançando um raio para baixo só contra estes objetos. */
+ * é obtida lançando raios para baixo só contra estes objetos. */
 const walkables = [];
 function registerWalkable(obj, opts = {}) {
   obj.updateWorldMatrix(true, true);
@@ -166,6 +169,9 @@ topCamera.layers.enable(1);
  *      detalhes pequenos e planos (vitrines, portas, janelas) não projetam
  *      sombra (shadow=false em addBox) porque seriam invisíveis e só
  *      custariam desempenho.
+ *    - O boneco (avatar do jogador) também projeta sombra; em primeira pessoa
+ *      ele fica invisível para a câmera (colorWrite/depthWrite desligados),
+ *      mas continua entrando no shadow map.
  * ========================================================================== */
 
 // Luz 1: ambiente do céu/chão (sem sombra)
@@ -589,25 +595,179 @@ const chimneyMat = pbr('brick', [1, 2], { color: 0x8a4630 });
 const stepMat = pbr('stone', [4, 1], { color: 0xc4bcac });
 const doorMat = (awning) => mat(awning, 0.45, { metalness: 0.05 });
 
+
+/* ==========================================================================
+ * INTERIORES — lojas ocas, com porta aberta e zonas de colisão
+ *
+ * Cada loja é uma casca oca (fundo, laterais, fachada com vãos, piso e teto).
+ * O jogador só pode estar: (a) na praça/rua/calçada (quadrado PLAYER_LIMIT),
+ * (b) dentro da zona interna de uma loja, ou (c) no corredor estreito que liga
+ * a calçada à porta. Assim as paredes continuam sólidas e só o vão da porta passa.
+ * Móveis são "blockers" (retângulos proibidos).
+ * ========================================================================== */
+const WALL_T = 0.2;
+const ZONES = [];      // retângulos (mundo, XZ) onde o jogador pode ficar além da praça
+const INTERIORS = [];  // só as zonas internas (liga a luz de ambiente)
+const BLOCKERS = [];   // móveis: o jogador não entra
+const ROOFS = [];      // telhados (para as abóboras de Halloween)
+const lampMats = [];   // materiais dos postes (brilho muda no Halloween)
+let iseed = 99;        // PRNG separado, para não alterar o layout aleatório da cidade
+const irand = () => (iseed = (iseed * 16807) % 2147483647) / 2147483647;
+
+const inRect = (r, x, z) => x >= r.x0 && x <= r.x1 && z >= r.z0 && z <= r.z1;
+function toWorldRect(b, [x0, x1, z0, z1]) {
+  b.updateMatrixWorld(true);
+  const a = b.localToWorld(new THREE.Vector3(x0, 0, z0));
+  const c = b.localToWorld(new THREE.Vector3(x1, 0, z1));
+  return { x0: Math.min(a.x, c.x), x1: Math.max(a.x, c.x), z0: Math.min(a.z, c.z), z1: Math.max(a.z, c.z) };
+}
+function canStand(x, z) {
+  for (const r of BLOCKERS) if (inRect(r, x, z)) return false;
+  if (Math.abs(x) <= PLAYER_LIMIT && z <= PLAYER_LIMIT && z >= northLimitAt(x)) return true;
+  for (const r of ZONES) if (inRect(r, x, z)) return true;
+  return false;
+}
+
+const glassClear = mat(0xbfd8e0, 0.05, { metalness: 0.1, envMapIntensity: 1.6, transparent: true, opacity: 0.22, depthWrite: false });
+const lampMat = mat(0xfff2c0, 0.4, { emissive: 0xffe39a, emissiveIntensity: 1.3 });
+const ceilMat = mat(0xf1e8d4, 0.9);
+const counterMat = pbr('wood', [2, 1], { color: 0x8a5a30, normalScale: 0.8 });
+const shelfMat = pbr('wood', [2, 1], { color: 0x6e4725, normalScale: 0.6 });
+const GOODS = [0xc0392b, 0x2f6b4a, 0xd4a02a, 0x24405e, 0xe0a526, 0x6b3a5e];
+const RUGS = [0x8a2f2f, 0x2f4f6b, 0x6b5a2f, 0x4a6b3a];
+
+/** Pedaço de parede (x0..x1, y0..y1) no plano z. */
+function wallSeg(g, mk, x0, x1, y0, y1, z, t = WALL_T) {
+  const w = x1 - x0, h = y1 - y0;
+  if (w <= 0.001 || h <= 0.001) return;
+  addBox(g, w, h, t, mk(w, h), (x0 + x1) / 2, (y0 + y1) / 2, z);
+}
+
+/** Moldura em volta de um vão (barras + travessas opcionais). */
+function addFrame(g, x0, x1, y0, y1, z, { sill = true, mullion = true, b = 0.1 } = {}) {
+  const w = x1 - x0, h = y1 - y0, cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+  addBox(g, w + 2 * b, b, 0.26, frameMat, cx, y1 + b / 2, z, false);
+  if (sill) addBox(g, w + 2 * b, b, 0.26, frameMat, cx, y0 - b / 2, z, false);
+  addBox(g, b, h, 0.26, frameMat, x0 - b / 2, cy, z, false);
+  addBox(g, b, h, 0.26, frameMat, x1 + b / 2, cy, z, false);
+  if (mullion) {
+    addBox(g, w, 0.04, 0.06, frameMat, cx, cy, z, false);
+    addBox(g, 0.04, h, 0.06, frameMat, cx, cy, z, false);
+  }
+}
+
+/** Porta aberta: batente + folha girada para dentro. */
+function addDoor(g, doorX, doorW, doorH, front, color) {
+  const z = front - WALL_T / 2;
+  addFrame(g, doorX - doorW / 2, doorX + doorW / 2, 0, doorH, z, { sill: false, mullion: false });
+  const leafW = doorW - 0.2, leafH = doorH - 0.1;
+  const pivot = new THREE.Group();
+  pivot.position.set(doorX - doorW / 2 + 0.05, 0.03, front - WALL_T - 0.05);
+  pivot.rotation.y = Math.PI / 2 * 0.92; // aberta, encostada na lateral de dentro
+  addBox(pivot, leafW, leafH, 0.05, doorMat(color), leafW / 2, leafH / 2, 0, false);
+  g.add(pivot);
+}
+
+/**
+ * Casca oca: fundo, laterais, fachada com vãos (porta + janelas), piso, teto e
+ * luminárias. Registra as zonas de colisão em g.userData.
+ */
+function buildShell(g, { w, d, h, mk, doorX, doorW, doorH, openings = [], ceilY = 3.4, floorTop = 0.045, floorMat }) {
+  const front = d / 2, t = WALL_T, zf = front - t / 2;
+
+  // fundo e laterais
+  addBox(g, w, h, t, mk(w, h), 0, h / 2, -front + t / 2);
+  for (const sx of [-1, 1]) addBox(g, t, h, d - t, mk(d, h), sx * (w / 2 - t / 2), h / 2, t / 2);
+
+  // fachada: trechos entre os vãos + parede acima/abaixo de cada vão
+  const ops = [{ x0: doorX - doorW / 2, x1: doorX + doorW / 2, y0: 0, y1: doorH, door: true }, ...openings]
+    .sort((a, b) => a.x0 - b.x0);
+  let cx = -w / 2;
+  for (const o of ops) {
+    wallSeg(g, mk, cx, o.x0, 0, ceilY, zf);
+    wallSeg(g, mk, o.x0, o.x1, 0, o.y0, zf);        // peitoril
+    wallSeg(g, mk, o.x0, o.x1, o.y1, ceilY, zf);    // verga
+    if (!o.door) {
+      addFrame(g, o.x0, o.x1, o.y0, o.y1, zf);
+      addBox(g, o.x1 - o.x0, o.y1 - o.y0, 0.03, glassClear, (o.x0 + o.x1) / 2, (o.y0 + o.y1) / 2, zf, false);
+    }
+    cx = o.x1;
+  }
+  wallSeg(g, mk, cx, w / 2, 0, ceilY, zf);
+  wallSeg(g, mk, -w / 2, w / 2, ceilY, h, zf);      // faixa de cima (janelas do 2º andar são decoração)
+
+  // piso (vai até a frente, por baixo da soleira) e teto
+  const floor = addBox(g, w - 2 * t, floorTop, d - t, floorMat, 0, floorTop / 2, t / 2, false);
+  if (floorTop > 0.1) g.userData.floor = floor; // piso elevado vira "caminhável"
+  addBox(g, w - 2 * t, 0.1, d - 2 * t, ceilMat, 0, ceilY + 0.05, 0, false);
+  for (const [lx, lz] of [[-w * 0.2, 0], [w * 0.25, 0.8]]) {
+    addBox(g, 0.55, 0.06, 0.55, lampMat, lx, ceilY - 0.03, lz, false);
+  }
+
+  // zonas (coordenadas locais): interior, e corredor da porta até a calçada
+  const m = 0.3;
+  g.userData.zones = [
+    [-w / 2 + t + m, w / 2 - t - m, -front + t + 0.55, front - t - m],
+    [doorX - 0.4, doorX + 0.4, front - t - 0.8, front + 1.2],
+  ];
+  g.userData.blockers = [];
+}
+
+function furnishShop(g, w, d) {
+  const front = d / 2, backZ = -front + WALL_T;
+  const fy = 0.045;
+  // prateleiras no fundo, com mercadorias
+  for (let k = 0; k < 3; k++) {
+    const y = fy + 0.45 + k * 0.85;
+    addBox(g, w - 0.7, 0.06, 0.42, shelfMat, 0, y, backZ + 0.21, false);
+    const n = 5, span = w - 1.2;
+    for (let j = 0; j < n; j++) {
+      const gw = 0.35 + irand() * 0.25, gh = 0.25 + irand() * 0.3;
+      const col = GOODS[Math.floor(irand() * GOODS.length)];
+      addBox(g, gw, gh, 0.3, mat(col, 0.7), -span / 2 + (j + 0.5) * (span / n), y + 0.03 + gh / 2, backZ + 0.2, false);
+    }
+  }
+  // balcão (bloqueia o lado esquerdo)
+  const cxm = -w * 0.2;
+  addBox(g, 2.4, 1.0, 0.7, counterMat, cxm, fy + 0.5, 0, false);
+  addBox(g, 2.5, 0.06, 0.8, shelfMat, cxm, fy + 1.03, 0, false);
+  g.userData.blockers.push([cxm - 1.5, cxm + 1.5, -0.65, 0.65]);
+  // mesinha
+  const tx = 1.9, tz = -1.6;
+  addBox(g, 0.8, 0.05, 0.8, counterMat, tx, fy + 0.75, tz, false);
+  addBox(g, 0.1, 0.72, 0.1, shelfMat, tx, fy + 0.36, tz, false);
+  g.userData.blockers.push([tx - 0.7, tx + 0.7, tz - 0.7, tz + 0.7]);
+  // tapete
+  addBox(g, 2.2, 0.01, 1.6, mat(RUGS[Math.floor(irand() * RUGS.length)], 0.95), 1.4, fy + 0.005, 1.1, false);
+}
+
 function buildShop({ w, d, h, color, awning, name }) {
   const g = new THREE.Group();
   const front = d / 2;
+  const cache = new Map();
+  const mk = (pw, ph) => {
+    const k = `${pw.toFixed(2)}|${ph.toFixed(2)}`;
+    if (!cache.has(k)) cache.set(k, pbr('brick', [pw / 1.2, ph / 1.2], { color, normalScale: 1.2 }));
+    return cache.get(k);
+  };
+  const doorX = w * 0.3, doorW = 1.3, doorH = 2.5;
 
-  // fachada de tijolo: 1 repetição da textura ≈ 1,2 m (4 tijolos x 8 fiadas)
-  const bodyMat = pbr('brick', [w / 1.2, h / 1.2], { color, normalScale: 1.2 });
-  addBox(g, w, h, d, bodyMat, 0, h / 2, 0);                           // corpo
-  addBox(g, w + 0.3, 0.4, d + 0.3, creamMat, 0, h + 0.2, 0);          // cornija
-  addBox(g, w - 0.2, 0.1, d - 0.2, roofMat, 0, h + 0.45, 0);          // telhado plano
-  addBox(g, w + 0.1, 0.5, 0.1, creamMat, 0, 0.25, front + 0.03);      // rodapé
+  buildShell(g, {
+    w, d, h, mk, doorX, doorW, doorH, ceilY: 3.4, floorTop: 0.045,
+    floorMat: pbr('wood', [w / 2, d / 2], { color: 0xb98a56, normalScale: 0.6 }),
+    openings: [{ x0: -w * 0.45, x1: w * 0.05, y0: 0.9, y1: 2.9 }], // vitrine
+  });
+  addDoor(g, doorX, doorW, doorH, front, awning);
 
-  // vitrine e porta
-  addBox(g, w * 0.5 + 0.2, 2.2, 0.08, frameMat, -w * 0.2, 1.9, front + 0.03, false);
-  addBox(g, w * 0.5, 2.0, 0.1, glassMat, -w * 0.2, 1.9, front + 0.06, false);
-  addBox(g, 1.3, 2.5, 0.08, frameMat, w * 0.3, 1.25, front + 0.03, false);
-  addBox(g, 1.1, 2.3, 0.1, doorMat(awning), w * 0.3, 1.2, front + 0.06, false);
-  addWreath(g, w * 0.3, 1.75, front + 0.14);
+  addBox(g, w + 0.3, 0.4, d + 0.3, creamMat, 0, h + 0.2, 0);   // cornija
+  addBox(g, w - 0.2, 0.1, d - 0.2, roofMat, 0, h + 0.45, 0);   // telhado plano
+  // rodapé externo só nos trechos de parede (não na porta)
+  const dl = doorX - doorW / 2, dr = doorX + doorW / 2;
+  addBox(g, dl + w / 2 + 0.05, 0.5, 0.1, creamMat, (-w / 2 - 0.05 + dl) / 2, 0.25, front + 0.03);
+  addBox(g, w / 2 + 0.05 - dr, 0.5, 0.1, creamMat, (dr + w / 2 + 0.05) / 2, 0.25, front + 0.03);
+  addWreath(g, dr + (w / 2 - dr) / 2, 1.9, front + 0.14);
 
-  // janelas do andar de cima
+  // janelas do andar de cima (decoração)
   const n = Math.max(2, Math.floor(w / 2));
   const uy = (3.4 + h) / 2 + 0.2;
   for (let i = 0; i < n; i++) {
@@ -629,6 +789,8 @@ function buildShop({ w, d, h, color, awning, name }) {
   // decoração na calçada
   decorCluster(g, -w * 0.4, front + 0.9);
 
+  furnishShop(g, w, d);
+  g.userData.h = h;
   return g;
 }
 
@@ -636,10 +798,23 @@ function buildTownHall(w, d, h) {
   const g = new THREE.Group();
   const front = d / 2;
   const pw = w * 0.8;
+  const cache = new Map();
+  const mk = (a, b) => {
+    const k = `${a.toFixed(2)}|${b.toFixed(2)}`;
+    if (!cache.has(k)) cache.set(k, pbr('stone', [a / 2, b / 2], { color: 0xf0ebe0, normalScale: 0.7 }));
+    return cache.get(k);
+  };
   const white = pbr('stone', [w / 2, h / 2], { color: 0xf0ebe0, normalScale: 0.7 }); // pedra clara
   const whiteCol = pbr('stone', [1, 3], { color: 0xf0ebe0, normalScale: 0.5 });      // colunas
+  const doorW = 1.8, doorH = 2.6, FLOOR = 0.3; // piso do hall na altura do degrau
 
-  addBox(g, w, h, d, white, 0, h / 2, 0);
+  buildShell(g, {
+    w, d, h, mk, doorX: 0, doorW, doorH, ceilY: 4.2, floorTop: FLOOR,
+    floorMat: pbr('stone', [3, 3], { color: 0xd8cfbb }),
+    openings: [-1, 1].map((s) => ({ x0: s * w * 0.35 - 0.45, x1: s * w * 0.35 + 0.45, y0: 1.0, y1: 2.8 })),
+  });
+  addDoor(g, 0, doorW, doorH, front, 0x2f6b4a);
+
   addBox(g, w + 0.3, 0.4, d + 0.3, creamMat, 0, h + 0.2, 0);
   addBox(g, w - 0.2, 0.1, d - 0.2, roofMat, 0, h + 0.45, 0);
 
@@ -663,19 +838,24 @@ function buildTownHall(w, d, h) {
   ped.castShadow = true;
   g.add(ped);
 
-  // porta dupla, janelas, letreiro
-  addBox(g, 1.8, 2.6, 0.1, mat(0x2f6b4a, 0.45), 0, 1.45, front + 0.05, false);
-  for (const x of [-w * 0.35, w * 0.35]) {
-    addBox(g, 1.1, 1.8, 0.08, frameMat, x, 1.9, front + 0.03, false);
-    addBox(g, 0.9, 1.6, 0.1, glassMat, x, 1.9, front + 0.06, false);
-  }
   const sign = makeSign('Town Hall', 3.2, '#1f3a5a', '#f4ecd0');
   sign.position.set(0, 3.2, front + 0.08);
   g.add(sign);
-  addWreath(g, 0, 2.2, front + 0.16, 0.32);
+  addWreath(g, 1.3, 2.2, front + 0.16, 0.32);
 
   decorCluster(g, -w * 0.38, front + 2.8);
   decorCluster(g, w * 0.38, front + 2.8);
+
+  // mobília: mesa do prefeito e dois bancos
+  addBox(g, 3.2, 1.0, 0.8, counterMat, 0, FLOOR + 0.5, -1.7, false);
+  g.userData.blockers.push([-1.9, 1.9, -2.4, -1.0]);
+  for (const sx of [-1, 1]) {
+    addBox(g, 0.5, 0.08, 1.6, shelfMat, sx * 2.3, FLOOR + 0.45, 0.8, false);
+    addBox(g, 0.4, 0.4, 0.1, shelfMat, sx * 2.3, FLOOR + 0.2, 0.2, false);
+    addBox(g, 0.4, 0.4, 0.1, shelfMat, sx * 2.3, FLOOR + 0.2, 1.4, false);
+    g.userData.blockers.push([sx * 2.3 - 0.5, sx * 2.3 + 0.5, -0.25, 1.85]);
+  }
+  g.userData.h = h;
   return g;
 }
 
@@ -708,7 +888,14 @@ SIDES.forEach((side, si) => {
     b.position.set(x, 0, z);
     b.rotation.y = side.rotY;
     scene.add(b);
-    if (b.userData.step) registerWalkable(b.userData.step); // degrau da prefeitura
+    b.updateMatrixWorld(true);
+    const zs = b.userData.zones.map((r) => toWorldRect(b, r));
+    ZONES.push(...zs);
+    INTERIORS.push(zs[0]);
+    ROOFS.push({ b, h: b.userData.h });
+    for (const r of b.userData.blockers) BLOCKERS.push(toWorldRect(b, r));
+    if (b.userData.step) registerWalkable(b.userData.step);   // degrau da prefeitura
+    if (b.userData.floor) registerWalkable(b.userData.floor); // piso elevado do hall
   });
 });
 
@@ -724,6 +911,7 @@ function addLamp(x, z) {
     new THREE.MeshStandardMaterial({ color: 0xfff2c0, emissive: 0xffe39a, emissiveIntensity: 0.9, roughness: 0.3 })
   );
   lamp.position.y = 3.6;
+  lampMats.push(lamp.material);
   g.add(lamp);
   addCyl(g, 0.12, 0.12, 0.08, ironMat, 0, 3.35, 0, 10);
   addWreath(g, 0, 2.4, 0.1, 0.26);
@@ -876,16 +1064,553 @@ for (let k = 0; k < 4; k++) {
 }
 
 
+/* ==========================================================================
+ * BONECO (avatar do jogador) + luz interna
+ *
+ * Em primeira pessoa o corpo fica invisível para a câmera principal (colorWrite
+ * e depthWrite desligados), mas continua projetando sombra no shadow map.
+ * Na visão de cima (minimapa) e na terceira pessoa (tecla V) ele aparece.
+ * ========================================================================== */
+const avatar = new THREE.Group();
+const avatarMats = [];
+const limbs = {};
+(function buildAvatar() {
+  const std = (c) => { const m = new THREE.MeshStandardMaterial({ color: c, roughness: 0.8 }); avatarMats.push(m); return m; };
+  const skin = std(0xe8b894), shirt = std(0xb5402a), pants = std(0x24405e), hair = std(0x4a2f1c), shoe = std(0x2b2118);
+  const part = (geo, m, x, y, z, parent = avatar) => {
+    const o = new THREE.Mesh(geo, m);
+    o.position.set(x, y, z);
+    o.castShadow = true;
+    parent.add(o);
+    return o;
+  };
+  part(new THREE.BoxGeometry(0.44, 0.6, 0.24), shirt, 0, 1.15, 0);               // tronco
+  part(new THREE.SphereGeometry(0.15, 16, 12), skin, 0, 1.56, 0);                 // cabeça
+  part(new THREE.SphereGeometry(0.155, 16, 12, 0, Math.PI * 2, 0, Math.PI * 0.55), hair, 0, 1.575, 0.02); // cabelo
+  const limb = (x, y, w, h, d, m) => {
+    const p = new THREE.Group();
+    p.position.set(x, y, 0);
+    part(new THREE.BoxGeometry(w, h, d), m, 0, -h / 2, 0, p);
+    avatar.add(p);
+    return p;
+  };
+  limbs.legL = limb(-0.11, 0.85, 0.18, 0.8, 0.2, pants);
+  limbs.legR = limb(0.11, 0.85, 0.18, 0.8, 0.2, pants);
+  limbs.armL = limb(-0.3, 1.42, 0.12, 0.6, 0.14, shirt);
+  limbs.armR = limb(0.3, 1.42, 0.12, 0.6, 0.14, shirt);
+  for (const l of [limbs.legL, limbs.legR]) part(new THREE.BoxGeometry(0.18, 0.08, 0.3), shoe, 0, -0.76, -0.05, l);
+})();
+scene.add(avatar);
+
+function setAvatarVisible(v) {
+  for (const m of avatarMats) { m.colorWrite = v; m.depthWrite = v; } // invisível, mas ainda projeta sombra
+}
+
+function updateAvatar(amp) {
+  avatar.position.set(camera.position.x, groundY, camera.position.z);
+  avatar.rotation.y = yaw;
+  const sw = Math.sin(bobT) * 0.7 * amp;
+  limbs.legL.rotation.x = sw;  limbs.legR.rotation.x = -sw;
+  limbs.armL.rotation.x = -sw; limbs.armR.rotation.x = sw;
+}
+
+// luz quente que acende quando o jogador está dentro de uma loja
+const roomLight = new THREE.PointLight(0xffe2b8, 0, 10, 1.6);
+scene.add(roomLight);
+const ROOM_LIGHT_MAX = 12;
+function updateRoomLight(dt) {
+  const px = camera.position.x, pz = camera.position.z;
+  let inside = false;
+  for (const r of INTERIORS) if (inRect(r, px, pz)) { inside = true; break; }
+  roomLight.intensity += ((inside ? ROOM_LIGHT_MAX : 0) - roomLight.intensity) * (1 - Math.exp(-6 * dt));
+  roomLight.position.set(px, groundY + 2.4, pz);
+}
+
+
+/* ==========================================================================
+ * HALLOWEEN
+ *
+ * - Bruxa na praça: chegue perto e aperte E para conversar. No fim da conversa
+ *   a cidade vira Halloween (transição suave de ~3,5 s). Atalho direto: tecla H.
+ * - Muda: céu/névoa (noite roxa), luz hemisférica (roxa), sol (luar azulado),
+ *   env map, tint de TODAS as texturas PBR (tijolo, pedra, asfalto, madeira...),
+ *   grama seca, vidros acesos em laranja, postes verdes.
+ * - Surgem: abóboras em toda a cidade (modelo glTF, com brilho), fantasmas voando
+ *   em círculos pelo céu, lua, estrelas e luzes laranja na praça. Raios de vez em quando.
+ * - Os modelos de fantasma e abóbora são opcionais: se o arquivo não carregar,
+ *   são usados fantasmas e abóboras gerados por código.
+ * ========================================================================== */
+const hrand = (() => { let s = 4242; return () => (s = (s * 16807) % 2147483647) / 2147483647; })();
+const lerp = THREE.MathUtils.lerp;
+const easeOutBack = (t) => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2); };
+const HW_DURATION = 3.5; // segundos da transição
+let hw = 0, hwTarget = 0, hwApplied = -1;
+
+// Onde estão os modelos (pasta própria para cada um) + ajustes de tamanho e direção da frente
+const HW_ASSETS = {
+  ghost:   { name: 'Fantasma', url: '/models/ghost_phantom/scene.gltf', height: 2.2, yaw: 0 },
+  pumpkin: { name: 'Abóbora',  url: '/models/pumpkin/scene.gltf',       height: 0.6, yaw: 0 },
+};
+
+const hwc = (hex) => new THREE.Color(hex);
+const C = {
+  sky: hwc(SKY), night: hwc(0x120a22),
+  hemiSky0: hwc(0xfff1d6), hemiSky1: hwc(0x6a4a9a),
+  hemiGnd0: hwc(0x7a6a4c), hemiGnd1: hwc(0x2b1a12),
+  sun0: hwc(0xffe6bf), sun1: hwc(0x8fa0ff),
+  tint: hwc(0x8f86b8), grass: hwc(0x4b5326),
+  lamp0: hwc(0xffe39a), lamp1: hwc(0x66ff7a),
+  glass0: hwc(0x2a3a40), glass1: hwc(0xff8a2a),
+};
+const _tint = new THREE.Color();
+const ghostMats = [];
+
+// ---------- lua, halo e estrelas (acompanham a câmera) ----------
+const MOON_OFF = new THREE.Vector3(-26, 36, -44);
+const moon = new THREE.Mesh(
+  new THREE.SphereGeometry(5, 24, 16),
+  new THREE.MeshBasicMaterial({ color: 0xffe9b8, fog: false, transparent: true, opacity: 0 })
+);
+const halo = new THREE.Mesh(
+  new THREE.SphereGeometry(7.5, 24, 16),
+  new THREE.MeshBasicMaterial({ color: 0xffc66a, fog: false, transparent: true, opacity: 0, depthWrite: false })
+);
+const stars = (() => {
+  const p = [];
+  for (let i = 0; i < 350; i++) {
+    const u = hrand() * Math.PI * 2, y = 0.15 + hrand() * 0.85, r = Math.sqrt(1 - y * y);
+    p.push(Math.cos(u) * r * 68, y * 68, Math.sin(u) * r * 68);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(p, 3));
+  return new THREE.Points(g, new THREE.PointsMaterial({ color: 0xffffff, size: 0.5, fog: false, transparent: true, opacity: 0, depthWrite: false }));
+})();
+moon.visible = halo.visible = stars.visible = false;
+scene.add(moon, halo, stars);
+
+// luzes laranja da praça (intensidade 0 até virar Halloween)
+const lanternLights = [[3.1, 3.1], [-3.1, 3.1], [3.1, -3.1], [-3.1, -3.1]].map(([x, z]) => {
+  const l = new THREE.PointLight(0xff7a1a, 0, 10, 1.6);
+  l.position.set(x, 1.1, z);
+  scene.add(l);
+  return l;
+});
+
+// ---------- onde nascem as abóboras ----------
+const spots = [];
+const addSpot = (x, z, s = 1, y = 0.04, rot = null) =>
+  spots.push({ x, y, z, s, rot: rot ?? Math.atan2(-x, -z) + (hrand() - 0.5) * 0.9, delay: hrand() * 0.45 });
+
+for (let x = -13; x <= 13; x += 2.6) {            // calçadas norte e sul
+  for (const sz of [-1, 1]) {
+    if (sz < 0 && x > -0.5 && x < 7.2) continue;   // escada/mesa da cafeteria
+    addSpot(x + (hrand() - 0.5) * 0.6, sz * (15 + (hrand() - 0.5) * 1.2), 0.9 + hrand() * 0.5);
+  }
+}
+for (let z = -13; z <= 13; z += 2.6) {            // calçadas oeste e leste
+  for (const sx of [-1, 1]) addSpot(sx * (15 + (hrand() - 0.5) * 1.2), z + (hrand() - 0.5) * 0.6, 0.9 + hrand() * 0.5);
+}
+for (let i = 0; i < 10; i++) {                    // anel da praça
+  const a = (i / 10) * Math.PI * 2, r = 4.3 + hrand() * 0.6;
+  addSpot(Math.cos(a) * r, Math.sin(a) * r, 1 + hrand() * 0.4, 0.05);
+}
+for (const z of [-12, -9, -6, 9, 12]) for (const sx of [-1, 1]) addSpot(sx * 1.8, z, 0.8 + hrand() * 0.4); // caminhos
+for (const [x, z] of [[-9.5, 5], [9.5, 5], [-9.5, -5], [9.5, -5]]) addSpot(x, z, 2.4, 0.03);           // gigantes
+for (const { b, h } of ROOFS) {                   // telhados
+  for (const [lx, lz, s] of [[-1.8, 1.0, 1.5], [-0.2, 1.7, 1.15]]) {
+    const p = b.localToWorld(new THREE.Vector3(lx, h + 0.5, lz));
+    spots.push({ x: p.x, y: p.y, z: p.z, s, rot: b.rotation.y, delay: hrand() * 0.45 });
+  }
+}
+
+const pumpkinGroup = new THREE.Group();
+const ghostGroup = new THREE.Group();
+pumpkinGroup.visible = ghostGroup.visible = false;
+scene.add(pumpkinGroup, ghostGroup);
+const pumpkins = [];
+const ghosts = [];
+
+// ---------- modelos de reserva (gerados por código) ----------
+function faceCanvas(bg, fg, ribs) {
+  const W = 512, H = 256, c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+  if (ribs) {
+    ctx.strokeStyle = 'rgba(60,20,0,0.35)'; ctx.lineWidth = 5;
+    for (let i = 0; i < 16; i++) { ctx.beginPath(); ctx.moveTo(i * 32, 0); ctx.quadraticCurveTo(i * 32 + 8, H / 2, i * 32, H); ctx.stroke(); }
+  }
+  ctx.fillStyle = fg;
+  const cx = W * 0.25; // centro da frente da esfera
+  const tri = (a, b, c2, d, e, f) => { ctx.beginPath(); ctx.moveTo(a, b); ctx.lineTo(c2, d); ctx.lineTo(e, f); ctx.closePath(); ctx.fill(); };
+  tri(cx - 50, 118, cx - 14, 118, cx - 32, 80);   // olho esquerdo
+  tri(cx + 14, 118, cx + 50, 118, cx + 32, 80);   // olho direito
+  tri(cx - 8, 136, cx + 8, 136, cx, 122);         // nariz
+  ctx.beginPath(); ctx.moveTo(cx - 64, 146); ctx.lineTo(cx + 64, 146);
+  for (let i = 0; i <= 8; i++) ctx.lineTo(cx + 64 - i * 16, i % 2 ? 168 : 190);
+  ctx.closePath(); ctx.fill();                    // boca com dentes
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+
+function buildFallbackPumpkin(cfg) {
+  const jack = new THREE.MeshStandardMaterial({
+    map: faceCanvas('#e8741a', '#1a0a00', true),
+    emissiveMap: faceCanvas('#000000', '#ffb020', false),
+    emissive: 0xffffff, emissiveIntensity: 1.5, roughness: 0.55,
+  });
+  const stem = new THREE.MeshStandardMaterial({ color: 0x4f6a2a, roughness: 0.85 });
+  jack.userData.hwSkip = stem.userData.hwSkip = true;
+  const g = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.SphereGeometry(0.3, 20, 14), jack);
+  body.scale.y = 0.82; body.position.y = 0.246;
+  const st = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.05, 0.14, 8), stem);
+  st.position.y = 0.54;
+  body.castShadow = true; st.castShadow = true;
+  g.add(body, st);
+  g.scale.setScalar(cfg.height / 0.6);
+  return g;
+}
+
+function buildFallbackGhost(cfg) {
+  const parts = [];
+  const head = new THREE.SphereGeometry(0.42, 16, 12); head.translate(0, 1.15, 0); parts.push(head);
+  const trunk = new THREE.CylinderGeometry(0.42, 0.52, 0.9, 16); trunk.translate(0, 0.7, 0); parts.push(trunk);
+  for (let i = 0; i < 7; i++) {
+    const a = (i / 7) * Math.PI * 2, s = new THREE.SphereGeometry(0.2, 8, 6);
+    s.translate(Math.cos(a) * 0.4, 0.25 + (i % 2) * 0.06, Math.sin(a) * 0.4); parts.push(s);
+  }
+  for (const sx of [-1, 1]) {
+    const arm = new THREE.SphereGeometry(0.14, 8, 6); arm.scale(1, 2.2, 1); arm.rotateZ(sx * 0.9); arm.translate(sx * 0.55, 0.95, 0.05); parts.push(arm);
+  }
+  const face = [];
+  for (const sx of [-1, 1]) { const e = new THREE.SphereGeometry(0.07, 8, 6); e.scale(0.9, 1.5, 0.6); e.translate(sx * 0.15, 1.2, 0.4); face.push(e); }
+  const mo = new THREE.SphereGeometry(0.09, 8, 6); mo.scale(1, 1.4, 0.6); mo.translate(0, 0.95, 0.385); face.push(mo);
+  const m = new THREE.MeshStandardMaterial({ color: 0xf4f8ff, emissive: 0xbcd8ff, emissiveIntensity: 0.9, roughness: 0.6, transparent: true, opacity: 0, fog: false, depthWrite: false });
+  const fm = new THREE.MeshBasicMaterial({ color: 0x10101a, transparent: true, opacity: 0, fog: false });
+  m.userData.hwSkip = true;
+  ghostMats.push(m, fm);
+  const g = new THREE.Group();
+  g.add(new THREE.Mesh(mergeGeometries(parts), m), new THREE.Mesh(mergeGeometries(face), fm));
+  g.scale.setScalar(cfg.height / 1.6);
+  return g;
+}
+
+// ---------- carregamento dos modelos glTF (com reserva) ----------
+function loadTexAny(urls, srgb = true) {
+  const t = new THREE.Texture();
+  t.flipY = false; // convenção do glTF
+  if (srgb) t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = MAX_ANISO;
+  const tryAt = (i) => {
+    if (i >= urls.length) return;
+    new THREE.ImageLoader().load(urls[i], (img) => { t.image = img; t.needsUpdate = true; }, undefined, () => tryAt(i + 1));
+  };
+  tryAt(0);
+  return t;
+}
+
+function setupGhostModel(obj, url) {
+  const dir = url.slice(0, url.lastIndexOf('/') + 1);
+  const diffuse = loadTexAny([dir + 'textures/Fantasma_diffuse.png', dir + 'Fantasma_diffuse.png']);
+  const emissive = loadTexAny([dir + 'textures/Fantasma_emissive.png', dir + 'Fantasma_emissive.png']);
+  obj.traverse((o) => {
+    if (!o.isMesh) return;
+    // o glTF usa pbrSpecularGlossiness (não suportado nas versões novas do three): refazemos o material
+    const m = new THREE.MeshStandardMaterial({
+      map: o.material.map ?? diffuse, emissiveMap: o.material.emissiveMap ?? emissive,
+      emissive: 0xffffff, emissiveIntensity: 0.9, color: 0xffffff, roughness: 0.6,
+      transparent: true, opacity: 0, fog: false, depthWrite: false,
+    });
+    m.userData.hwSkip = true;
+    o.material = m;
+    o.castShadow = false;
+    ghostMats.push(m);
+  });
+}
+
+function setupPumpkinModel(obj) {
+  obj.traverse((o) => {
+    if (!o.isMesh) return;
+    for (const m of [].concat(o.material)) {
+      if (m.map) m.emissiveMap = m.map;
+      m.emissive = new THREE.Color(0xff6a10);
+      m.emissiveIntensity = 0.55; // brilho de lanterna
+      m.userData.hwSkip = true;
+    }
+  });
+}
+
+async function loadHwTemplate(cfg, fallback, setup) {
+  try {
+    const gltf = await gltfLoader.loadAsync(cfg.url);
+    const obj = gltf.scene;
+    enableShadows(obj);
+    setup(obj, cfg.url);
+    console.log(`[halloween] ${cfg.name} carregado de ${cfg.url}`);
+    return fitAndPlace(obj, { name: cfg.name, height: cfg.height, position: [0, 0, 0], rotationY: 0 });
+  } catch (err) {
+    console.warn(`[halloween] ${cfg.name}: usando modelo de reserva (${cfg.url} não carregou)`, err);
+    return fallback(cfg);
+  }
+}
+
+function spawnPumpkins(tpl) {
+  for (const sp of spots) {
+    const h = tpl.clone(true);
+    h.position.set(sp.x, sp.y, sp.z);
+    h.rotation.y = sp.rot + HW_ASSETS.pumpkin.yaw;
+    h.userData.sp = sp;
+    h.traverse((o) => { if (o.isMesh) o.castShadow = sp.s >= 1.4; }); // só as grandes projetam sombra
+    h.scale.setScalar(0.0001);
+    pumpkinGroup.add(h);
+    pumpkins.push(h);
+  }
+}
+
+function spawnGhosts(tpl) {
+  for (let i = 0; i < 17; i++) {
+    const low = i >= 14; // 3 fantasmas "correndo" perto do chão
+    const w = new THREE.Group();
+    w.rotation.order = 'YXZ';
+    const m = tpl.clone(true);
+    m.rotation.y = HW_ASSETS.ghost.yaw;
+    w.add(m);
+    w.scale.setScalar(low ? 1.1 : 1.2 + hrand() * 0.7);
+    ghostGroup.add(w);
+    ghosts.push({
+      g: w, low,
+      R: low ? 13 + hrand() * 1.5 : 16 + hrand() * 26,
+      h: low ? 0.3 : 6 + hrand() * 14,
+      spd: (low ? 0.5 : 0.25 + hrand() * 0.5) * (hrand() < 0.5 ? -1 : 1),
+      ph: hrand() * Math.PI * 2,
+    });
+  }
+}
+
+async function initHalloweenAssets() {
+  const [gt, pt] = await Promise.all([
+    loadHwTemplate(HW_ASSETS.ghost, buildFallbackGhost, setupGhostModel),
+    loadHwTemplate(HW_ASSETS.pumpkin, buildFallbackPumpkin, setupPumpkinModel),
+  ]);
+  spawnPumpkins(pt);
+  spawnGhosts(gt);
+  applyDiagnostics();
+  hwApplied = -1; // reaplica o estado atual aos objetos novos
+}
+
+// ---------- a bruxa (NPC) ----------
+const NPC_POS = new THREE.Vector3(0, 0.04, 5.6);
+const NPC_RANGE = 3.2;
+const npc = new THREE.Group();
+const npcMats = [];
+let npcLantern, npcCloak, npcMark;
+(function buildNPC() {
+  const std = (c, extra = {}) => { const m = new THREE.MeshStandardMaterial({ color: c, roughness: 0.8, ...extra }); m.userData.hwSkip = true; npcMats.push(m); return m; };
+  const part = (geo, m, x, y, z, parent = npc) => { const o = new THREE.Mesh(geo, m); o.position.set(x, y, z); o.castShadow = true; parent.add(o); return o; };
+  const robe = std(0x2a1a3a), skin = std(0x8fb86a), hat = std(0x15101f), band = std(0xe07a1f), eye = std(0x111111);
+  npcCloak = part(new THREE.CylinderGeometry(0.14, 0.52, 1.5, 18), robe, 0, 0.75, 0);
+  part(new THREE.SphereGeometry(0.18, 16, 12), skin, 0, 1.68, 0);                                 // cabeça
+  part(new THREE.ConeGeometry(0.035, 0.14, 8), skin, 0, 1.64, 0.19).rotation.x = Math.PI / 2;      // nariz
+  for (const sx of [-1, 1]) {
+    part(new THREE.SphereGeometry(0.03, 8, 6), eye, sx * 0.07, 1.72, 0.155);                       // olhos
+    part(new THREE.CylinderGeometry(0.07, 0.09, 0.55, 8), robe, sx * 0.32, 1.15, 0.05).rotation.z = sx * 0.5; // mangas
+  }
+  part(new THREE.CylinderGeometry(0.4, 0.4, 0.03, 20), hat, 0, 1.82, 0);                          // aba
+  part(new THREE.ConeGeometry(0.22, 0.62, 18), hat, 0, 2.14, 0).rotation.z = 0.12;                // chapéu
+  part(new THREE.CylinderGeometry(0.225, 0.23, 0.08, 18), band, 0, 1.88, 0);                      // fita
+  part(new THREE.CylinderGeometry(0.02, 0.02, 1.9, 6), std(0x6b4a2a), -0.5, 0.95, 0.1).rotation.z = 0.1; // vassoura
+  part(new THREE.ConeGeometry(0.14, 0.4, 10), std(0xc9a24a), -0.41, 0.2, 0.1);
+  npcLantern = part(new THREE.SphereGeometry(0.13, 14, 10), std(0xff8a1a, { emissive: 0xff6a00, emissiveIntensity: 1.6, roughness: 0.5 }), 0.5, 1.1, 0.3);
+  npcLantern.castShadow = false;
+
+  const c = document.createElement('canvas');
+  c.width = c.height = 128;
+  const ctx = c.getContext('2d');
+  ctx.font = 'bold 110px Georgia, serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.lineWidth = 10; ctx.strokeStyle = '#2b1a05'; ctx.strokeText('!', 64, 70);
+  ctx.fillStyle = '#ffb020'; ctx.fillText('!', 64, 70);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  npcMark = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, fog: false }));
+  npcMark.scale.set(0.5, 0.5, 1);
+  npc.add(npcMark);
+})();
+npc.position.copy(NPC_POS);
+scene.add(npc);
+BLOCKERS.push({ x0: NPC_POS.x - 0.55, x1: NPC_POS.x + 0.55, z0: NPC_POS.z - 0.55, z1: NPC_POS.z + 0.55 });
+
+// ---------- HUD (balão de fala) e flash ----------
+const hud = document.createElement('div');
+Object.assign(hud.style, {
+  position: 'fixed', left: '50%', bottom: '90px', transform: 'translateX(-50%)', maxWidth: '560px',
+  padding: '12px 18px', background: 'rgba(20,10,30,0.85)', color: '#f4ecd0', font: '18px Georgia, serif',
+  border: '2px solid #e07a1f', borderRadius: '10px', display: 'none', textAlign: 'center', zIndex: '20', pointerEvents: 'none',
+});
+document.body.appendChild(hud);
+const flash = document.createElement('div');
+Object.assign(flash.style, { position: 'fixed', inset: '0', background: '#fff', opacity: '0', zIndex: '19', pointerEvents: 'none' });
+document.body.appendChild(flash);
+let hudKey = '';
+function setHud(html) {
+  if (html === hudKey) return;
+  hudKey = html;
+  hud.style.display = html ? 'block' : 'none';
+  hud.innerHTML = html;
+}
+
+const DLG_ON = [
+  '🎃 <b>Bruxa:</b> Ora, ora... mais um visitante passeando por Stars Hollow.',
+  '🎃 <b>Bruxa:</b> Esse outono está bonito demais, não acha? Falta um pouquinho de... mistério.',
+  '🎃 <b>Bruxa:</b> Feche os olhos e não se assuste. Vou acender as abóboras!',
+];
+const DLG_OFF = [
+  '🎃 <b>Bruxa:</b> Já cansou dos fantasmas? Posso devolver a cidade ao normal.',
+  '🎃 <b>Bruxa:</b> Então tá... puf!',
+];
+let dlg = null;
+function showLine() {
+  setHud(`${dlg.lines[dlg.i]}<div style="font-size:13px;opacity:.7;margin-top:6px">E para continuar</div>`);
+}
+function interactNPC() {
+  if (dlg) {
+    dlg.i++;
+    if (dlg.i >= dlg.lines.length) { const done = dlg.done; dlg = null; setHud(''); done(); } else showLine();
+    return;
+  }
+  const d = Math.hypot(camera.position.x - npc.position.x, camera.position.z - npc.position.z);
+  if (d > NPC_RANGE) return;
+  dlg = hwTarget === 0 ? { lines: DLG_ON, i: 0, done: () => setHalloween(true) } : { lines: DLG_OFF, i: 0, done: () => setHalloween(false) };
+  showLine();
+}
+function setHalloween(on) {
+  hwTarget = on ? 1 : 0;
+  flash.style.transition = 'none';
+  flash.style.opacity = '0.95';
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    flash.style.transition = 'opacity 1.6s ease-out';
+    flash.style.opacity = '0';
+  }));
+}
+function toggleHalloween() { setHalloween(hwTarget === 0); }
+
+function updateNPC(dt, t) {
+  const dx = camera.position.x - npc.position.x, dz = camera.position.z - npc.position.z;
+  const dist = Math.hypot(dx, dz);
+  if (dist < 14) {
+    let d = Math.atan2(dx, dz) - npc.rotation.y;
+    d = Math.atan2(Math.sin(d), Math.cos(d));
+    npc.rotation.y += d * Math.min(1, dt * 4);
+  }
+  npcLantern.position.y = 1.1 + Math.sin(t * 2) * 0.06;
+  npcCloak.rotation.z = Math.sin(t * 1.5) * 0.03;
+  npcMark.position.y = 2.9 + Math.sin(t * 3) * 0.08;
+  npcMark.visible = hwTarget === 0 && !dlg;
+  if (dlg && dist > 6) { dlg = null; setHud(''); }
+  if (!dlg) setHud(dist < NPC_RANGE ? 'Pressione <b>E</b> para falar com a Bruxa 🎃' : '');
+}
+
+// ---------- aplica o estado (0..1) a toda a cena ----------
+for (const m of [...avatarMats, ...lampMats, glassMat, glassClear, lampMat, pumpkinMat]) m.userData.hwSkip = true;
+
+function applyHalloween(h) {
+  const e = THREE.MathUtils.smoothstep(h, 0, 1);
+  scene.background.copy(C.sky).lerp(C.night, e);
+  scene.fog.color.copy(scene.background);
+  scene.fog.near = lerp(40, 10, e);
+  scene.fog.far = lerp(90, 62, e);
+  hemi.color.copy(C.hemiSky0).lerp(C.hemiSky1, e);
+  hemi.groundColor.copy(C.hemiGnd0).lerp(C.hemiGnd1, e);
+  hemi.intensity = lerp(0.6, 0.5, e);
+  sun.color.copy(C.sun0).lerp(C.sun1, e);
+  sun.intensity = lerp(1.5, 0.6, e);
+  scene.environmentIntensity = lerp(0.45, 0.12, e);
+  renderer.toneMappingExposure = lerp(1, 1.15, e);
+
+  glassMat.emissive.copy(C.glass0).lerp(C.glass1, e);
+  glassMat.emissiveIntensity = lerp(0.25, 0.9, e);
+  for (const m of lampMats) { m.emissive.copy(C.lamp0).lerp(C.lamp1, e); m.emissiveIntensity = lerp(0.9, 1.6, e); }
+
+  // texturas: tint roxo em tudo que é PBR; grama seca
+  _tint.set(0xffffff).lerp(C.tint, e);
+  scene.traverse((o) => {
+    if (!o.isMesh) return;
+    for (const m of [].concat(o.material)) {
+      if (!m.isMeshStandardMaterial || m.userData.hwSkip) continue;
+      m.userData.hwBase ??= m.color.clone();
+      if (m === grassMat) m.color.copy(m.userData.hwBase).lerp(C.grass, e * 0.85);
+      else m.color.copy(m.userData.hwBase).multiply(_tint);
+    }
+  });
+
+  const on = h > 0.001;
+  moon.visible = halo.visible = stars.visible = on;
+  moon.material.opacity = e;
+  halo.material.opacity = 0.18 * e;
+  stars.material.opacity = e;
+  pumpkinGroup.visible = ghostGroup.visible = on;
+  for (const m of ghostMats) m.opacity = (m.isMeshBasicMaterial ? 1 : 0.8) * e;
+  for (const p of pumpkins) {
+    const sp = p.userData.sp;
+    p.scale.setScalar(Math.max(0.0001, sp.s * easeOutBack(THREE.MathUtils.clamp((h - sp.delay) / 0.5, 0, 1))));
+  }
+}
+
+let nextBolt = 0, boltUntil = 0;
+function updateHalloween(dt, tms) {
+  const t = tms * 0.001;
+  updateNPC(dt, t);
+
+  if (hw !== hwTarget) hw = hwTarget > hw ? Math.min(hwTarget, hw + dt / HW_DURATION) : Math.max(hwTarget, hw - dt / HW_DURATION);
+  if (hw !== hwApplied) { applyHalloween(hw); hwApplied = hw; }
+  if (hw <= 0) return;
+
+  const e = THREE.MathUtils.smoothstep(hw, 0, 1);
+  moon.position.copy(camera.position).add(MOON_OFF);
+  halo.position.copy(moon.position);
+  stars.position.copy(camera.position);
+
+  for (const gh of ghosts) {
+    const a = gh.ph + t * gh.spd, dir = Math.sign(gh.spd);
+    gh.g.position.set(Math.cos(a) * gh.R, gh.h + Math.sin(t * 2.2 + gh.ph * 3) * (gh.low ? 0.25 : 1.2), Math.sin(a) * gh.R);
+    gh.g.rotation.y = Math.atan2(-Math.sin(a) * dir, Math.cos(a) * dir);
+    gh.g.rotation.x = 0.15;
+    gh.g.rotation.z = Math.sin(t * 3 + gh.ph) * 0.12;
+  }
+
+  lanternLights.forEach((l, i) => { l.intensity = e * 9 * (0.8 + 0.2 * Math.sin(t * 9 + i * 2.1) * Math.sin(t * 5.3 + i)); });
+
+  if (hw > 0.95) { // raios de vez em quando
+    if (t > nextBolt) {
+      boltUntil = t + 0.15;
+      nextBolt = t + 7 + hrand() * 9;
+      sun.intensity = 3;
+      scene.background.setHex(0x44336a);
+      scene.fog.color.copy(scene.background);
+    } else if (boltUntil && t > boltUntil) {
+      boltUntil = 0;
+      hwApplied = -1; // restaura as cores
+    }
+  }
+}
+
 const gltfLoader = new GLTFLoader();
 
 /** Escala o objeto para ter `height` de altura, apoia a base em y = 0 e depois posiciona. */
 function fitAndPlace(obj, cfg) {
   const box = new THREE.Box3().setFromObject(obj);
   const size = box.getSize(new THREE.Vector3());
-  const s = cfg.height / (size.y || 1);
+  let s = cfg.height / (size.y || 1);
+  if (cfg.maxWidth) s = Math.min(s, cfg.maxWidth / (size.x || 1));
+  if (cfg.maxDepth) s = Math.min(s, cfg.maxDepth / (size.z || 1));
   obj.scale.multiplyScalar(s);
 
   box.setFromObject(obj);
+  if (cfg.maxWidth || cfg.maxDepth) {
+    const f = box.getSize(new THREE.Vector3());
+    console.log(`[modelo] ${cfg.name} tamanho final: ${f.x.toFixed(2)} x ${f.y.toFixed(2)} x ${f.z.toFixed(2)} (L x A x P)`);
+  }
   const center = box.getCenter(new THREE.Vector3());
   obj.position.x -= center.x;
   obj.position.z -= center.z;
@@ -993,7 +1718,7 @@ const keys = new Set();
 
 window.addEventListener('keydown', (e) => {
   keys.add(e.code);
-  handleShortcuts(e.code);
+  if (!e.repeat) handleShortcuts(e.code);
 });
 window.addEventListener('keyup', (e) => keys.delete(e.code));
 
@@ -1010,6 +1735,9 @@ document.addEventListener('mousemove', (e) => {
 const _forward = new THREE.Vector3();
 const _right = new THREE.Vector3();
 const _move = new THREE.Vector3();
+const _dir = new THREE.Vector3();
+const _eye = new THREE.Vector3();
+const THIRD_DIST = 3.2; // distância da câmera em terceira pessoa
 
 /* Limite norte (z mínimo) do jogador na posição x.
  * Normalmente é -PLAYER_LIMIT (a calçada). Diante de um modelo com `enterDepth`
@@ -1021,19 +1749,24 @@ function northLimitAt(x) {
     const d = w.userData.enterDepth;
     if (!d) continue;
     const b = w.userData.walkBoxRaw;
-    if (x >= b.min.x && x <= b.max.x) limit = Math.min(limit, b.max.z - d);
+    if (x >= b.min.x + 0.3 && x <= b.max.x - 0.3) limit = Math.min(limit, Math.max(b.min.z + 0.4, b.max.z - d));
   }
   return limit;
 }
 
-/* Altura do chão sob o jogador (escadas).
+/* Altura do chão sob o jogador (escadas, degraus, pisos elevados).
+ * - 5 raios em volta dos pés (centro + 4 pontos a FOOT_R) e vale o mais alto: não "cai" entre degraus.
  * - O raio parte de (chão atual + STEP_UP_MAX): degraus de até STEP_UP_MAX são "subíveis"
- *   e o teto do gazebo (acima da origem do raio) é ignorado.
- * - FALL_MAX limita quanto o raio enxerga para baixo; se não achar nada, o chão é y = 0.
- * - A altura é suavizada (exponencial) para a câmera deslizar sobre os degraus em vez de dar saltos. */
-const STEP_UP_MAX = 0.6;   // maior degrau que o jogador sobe (m)
+ *   e tetos acima da origem do raio são ignorados.
+ * - Subida: suavização exponencial. Descida: queda com gravidade (parece um passo para baixo).
+ * - Enquanto sobe/desce (onStairs) a velocidade cai um pouco (STAIR_SLOW). */
+const STEP_UP_MAX = 0.65;  // maior degrau que o jogador sobe (m)
 const FALL_MAX = 4;        // maior queda detectada (m)
-const GROUND_SMOOTH = 14;  // maior = acompanha o degrau mais rápido
+const RISE_SMOOTH = 16;    // subida: maior = acompanha o degrau mais rápido
+const GRAVITY = 20;        // descida: acelera como uma queda curta
+const STAIR_SLOW = 0.75;   // velocidade relativa enquanto sobe/desce
+const FOOT_R = 0.28;
+const FOOT_SAMPLES = [[0, 0], [FOOT_R, 0], [-FOOT_R, 0], [0, FOOT_R], [0, -FOOT_R]];
 const raycaster = new THREE.Raycaster();
 const _rayOrigin = new THREE.Vector3();
 const _down = new THREE.Vector3(0, -1, 0);
@@ -1041,6 +1774,7 @@ const _active = [];
 const _hits = [];
 const _saved = [];
 let groundY = 0;
+let fallVel = 0, onStairs = false, bobT = 0, _lastPX = NaN, _lastPZ = NaN;
 
 function updateGround(dt) {
   const px = camera.position.x;
@@ -1051,6 +1785,10 @@ function updateGround(dt) {
     const b = w.userData.walkBox;
     if (px >= b.min.x && px <= b.max.x && pz >= b.min.z && pz <= b.max.z) _active.push(w);
   }
+
+  // parado e já assentado: não precisa lançar raios de novo
+  if (px === _lastPX && pz === _lastPZ && !onStairs) return groundY;
+  _lastPX = px; _lastPZ = pz;
 
   let target = 0;
   stats.walkHit = _active.length ? 'sem acerto (chão 0)' : '— (fora da área)';
@@ -1066,22 +1804,35 @@ function updateGround(dt) {
       }
     }
 
-    _rayOrigin.set(px, groundY + STEP_UP_MAX, pz);
-    raycaster.set(_rayOrigin, _down);
+    const fromY = groundY + STEP_UP_MAX;
     raycaster.far = STEP_UP_MAX + FALL_MAX;
-    _hits.length = 0;
-    raycaster.intersectObjects(_active, true, _hits);
-    if (_hits.length) {
-      target = _hits[0].point.y;
-      stats.walkHit = _hits[0].object.name || _hits[0].object.parent?.name || 'malha sem nome';
+    let best = -Infinity;
+    for (const [ox, oz] of FOOT_SAMPLES) {
+      _rayOrigin.set(px + ox, fromY, pz + oz);
+      raycaster.set(_rayOrigin, _down);
+      _hits.length = 0;
+      raycaster.intersectObjects(_active, true, _hits);
+      if (_hits.length && _hits[0].point.y > best) {
+        best = _hits[0].point.y;
+        stats.walkHit = _hits[0].object.name || _hits[0].object.parent?.name || 'malha sem nome';
+      }
     }
+    if (best > -Infinity) target = Math.max(0, best);
 
     for (let i = _saved.length - 2; i >= 0; i -= 2) _saved[i].side = _saved[i + 1]; // restaura (ordem inversa)
     _saved.length = 0;
   }
 
-  groundY += (target - groundY) * (1 - Math.exp(-GROUND_SMOOTH * dt));
-  if (Math.abs(target - groundY) < 0.002) groundY = target;
+  const diff = target - groundY;
+  if (diff > 0) {                       // subindo: desliza suave
+    fallVel = 0;
+    groundY += diff * (1 - Math.exp(-RISE_SMOOTH * dt));
+  } else if (diff < 0) {                // descendo: cai com gravidade
+    fallVel = Math.min(fallVel + GRAVITY * dt, 12);
+    groundY = Math.max(target, groundY - fallVel * dt);
+  }
+  if (Math.abs(target - groundY) < 0.002) { groundY = target; fallVel = 0; }
+  onStairs = Math.abs(target - groundY) > 0.01;
   stats.ground = Number(groundY.toFixed(2));
   return groundY;
 }
@@ -1102,18 +1853,26 @@ function updateNavigation(dt) {
   if (keys.has('KeyD')) _move.add(_right);
   if (keys.has('KeyA')) _move.sub(_right);
 
+  const ox = camera.position.x, oz = camera.position.z;
   if (_move.lengthSq() > 0) {
-    const speed = MOVE_SPEED * (keys.has('ShiftLeft') ? RUN_MULTIPLIER : 1);
+    const speed = MOVE_SPEED * (keys.has('ShiftLeft') ? RUN_MULTIPLIER : 1) * (onStairs ? STAIR_SLOW : 1);
     _move.normalize().multiplyScalar(speed * dt);
-    camera.position.add(_move);
+    const nx = ox + _move.x, nz = oz + _move.z;
+    // colisão com deslizamento: tenta X+Z, depois só X, depois só Z
+    if (canStand(nx, nz)) { camera.position.x = nx; camera.position.z = nz; }
+    else if (canStand(nx, oz)) camera.position.x = nx;
+    else if (canStand(ox, nz)) camera.position.z = nz;
   }
 
-
-  camera.position.x = THREE.MathUtils.clamp(camera.position.x, -PLAYER_LIMIT, PLAYER_LIMIT);
-  camera.position.z = THREE.MathUtils.clamp(camera.position.z, northLimitAt(camera.position.x), PLAYER_LIMIT);
-  camera.position.y = updateGround(dt) + EYE_HEIGHT; // acompanha escadas/degraus
+  const moved = Math.hypot(camera.position.x - ox, camera.position.z - oz) / Math.max(dt, 1e-4);
+  const amp = Math.min(1, moved / MOVE_SPEED);
+  bobT += moved * dt * 2.4;
+  camera.position.y = updateGround(dt) + EYE_HEIGHT + Math.sin(bobT * 2) * 0.02 * amp; // leve balanço ao andar
 
   camera.rotation.set(pitch, yaw, 0);
+
+  updateAvatar(amp);
+  updateRoomLight(dt);
 }
 
 
@@ -1125,6 +1884,7 @@ const state = {
   frustumCulling: true,    // (5)
   normalMaps: true,        // (6) M4: mapas de relevo
   roughnessMaps: true,     // (7) M4: mapas de rugosidade
+  thirdPerson: false,      // (V) terceira pessoa
   near: camera.near,
   far: camera.far,
 };
@@ -1187,6 +1947,8 @@ gui.add(state, 'depth').name('2 · Profundidade (depth)').onChange(applyDiagnost
 gui.add(state, 'backfaceCulling').name('3 · Back-face culling').onChange(applyDiagnostics);
 gui.add(state, 'showFrustum').name('4 · Mostrar frustum').onChange(applyDiagnostics);
 gui.add(state, 'frustumCulling').name('5 · Frustum culling').onChange(applyDiagnostics);
+gui.add(state, 'thirdPerson').name('V · Terceira pessoa');
+gui.add({ halloween: () => toggleHalloween() }, 'halloween').name('H · Halloween (ou fale com a bruxa)');
 
 const camFolder = gui.addFolder('Câmera principal (near / far)');
 camFolder.add(state, 'near', 0.01, 5, 0.01).onChange(updateCameraPlanes);
@@ -1203,6 +1965,7 @@ lightFolder.add(hemi, 'intensity', 0, 2, 0.05).name('Intensidade ambiente');
 lightFolder.add(sun, 'visible').name('Sol (direcional)');
 lightFolder.add(sun, 'intensity', 0, 3, 0.05).name('Intensidade do sol');
 lightFolder.add(sun, 'castShadow').name('Sombras do sol');
+lightFolder.add(roomLight, 'visible').name('Luz interna das lojas');
 
 // M4: materiais e ambiente
 const matFolder = gui.addFolder('Materiais e ambiente (M4)');
@@ -1226,7 +1989,10 @@ function handleShortcuts(code) {
     Digit5: 'frustumCulling',
     Digit6: 'normalMaps',
     Digit7: 'roughnessMaps',
+    KeyV: 'thirdPerson',
   };
+  if (code === 'KeyE') interactNPC();
+  if (code === 'KeyH') toggleHalloween();
   const prop = map[code];
   if (!prop) return;
   state[prop] = !state[prop];
@@ -1236,6 +2002,7 @@ function handleShortcuts(code) {
 
 applyDiagnostics();
 MODELS.forEach(loadModel); // depois do diagnóstico, para o estado já existir quando os modelos chegarem
+initHalloweenAssets();     // fantasmas e abóboras do Halloween (com modelos de reserva)
 
 
 const timer = new THREE.Timer();
@@ -1245,9 +2012,10 @@ const INSET = 0.28; // fração da tela ocupada pela visão de cima
 
 function animate(timestamp) {
   timer.update(timestamp);
-  const dt = timer.getDelta();
+  const dt = Math.min(timer.getDelta(), 0.05); // evita saltos grandes que atravessariam paredes
 
   updateNavigation(dt);
+  updateHalloween(dt, timestamp);
   camera.updateMatrixWorld();
   frustumHelper.update();
 
@@ -1261,7 +2029,18 @@ function animate(timestamp) {
   renderer.setViewport(0, 0, W, H);
   renderer.setScissor(0, 0, W, H);
   renderer.setScissorTest(true);
+
+  // terceira pessoa: afasta a câmera só para esta passada e restaura depois
+  const tp = state.thirdPerson;
+  if (tp) {
+    camera.getWorldDirection(_dir);
+    _eye.copy(camera.position);
+    camera.position.addScaledVector(_dir, -THIRD_DIST);
+    camera.position.y = Math.max(camera.position.y, 0.4);
+  }
+  setAvatarVisible(tp); // 1ª pessoa: corpo invisível, sombra continua
   renderer.render(scene, camera);
+  if (tp) camera.position.copy(_eye);
 
 
   stats.drawCalls = renderer.info.render.calls;
@@ -1269,6 +2048,7 @@ function animate(timestamp) {
 
 
   if (state.showFrustum) {
+    setAvatarVisible(true); // na visão de cima o boneco aparece
     const w = Math.floor(W * INSET);
     const h = Math.floor(H * INSET);
     const x = W - w - 10;
